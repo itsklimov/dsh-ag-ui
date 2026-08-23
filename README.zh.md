@@ -250,6 +250,8 @@ Shared state 是 model/UI collaboration data。它永远不授予 backend author
 /tool_based_generative_ui
 ```
 
+在 AG-UI 接受独立 DSH registry entry 之前，本地 upstream Dojo 测试会暂时复用 Claude Agent SDK TypeScript 菜单 entry，仅作为 URL/path alias。该过程不使用 Claude runtime、model 或 credential；准确说明见 example README。
+
 启动命令：
 
 ```bash

@@ -61,7 +61,13 @@ Shared-state route 接受普通 `HttpAgent.state`。HITL 与 generative-UI route
 
 ## 使用官方 AG-UI Dojo UI 测试
 
-Upstream Claude Agent SDK TypeScript entry 映射相同的五个 paths，并默认连接 `http://localhost:8020`。本地兼容性测试时，先在 `8020` 端口启动该 DSH example，再启动 upstream Dojo，不需要启动 Claude server：
+### 为什么菜单暂时显示 Claude Agent SDK
+
+Upstream Dojo integration registry 是静态源码。在 AG-UI maintainer 接受 upstream integration PR 之前，其中没有 `deepseek-harness` entry。现有 Claude Agent SDK TypeScript entry 已映射相同的五个 feature paths，并默认连接 `http://localhost:8020`，因此本地兼容性测试可以暂时把它作为 UI routing alias。
+
+复用的只有菜单 entry 与 URL mapping。通用 `HttpAgent` 会把 AG-UI request 发送到该 DSH server；该配置不会运行 Claude Agent SDK code、Claude model，也不需要 Anthropic credential。Upstream 注册完成后，Dojo 会显示独立的 **DeepSeek Harness** entry，不再需要该 alias。
+
+本地兼容性测试时，先在 `8020` 端口启动该 DSH example，再启动 upstream Dojo，不需要启动 Claude server：
 
 ```bash
 git clone https://github.com/ag-ui-protocol/ag-ui.git

@@ -250,6 +250,8 @@ The source-checkout-only keyless example exposes five standard feature paths thr
 /tool_based_generative_ui
 ```
 
+Until AG-UI accepts a dedicated DSH registry entry, local upstream Dojo testing temporarily reuses the Claude Agent SDK TypeScript menu entry only as a URL/path alias. No Claude runtime, model, or credential is involved; see the example README for the exact explanation.
+
 Start it with:
 
 ```bash
