@@ -1,0 +1,21 @@
+# Install the AG-UI Gateway in the Host plane. The row stays dormant until all
+# three required environment variables are configured by the deployment.
+- insert:
+    - id: ag-ui
+      name: dsh-ag-ui
+      disabled: !!js >-
+        !process.env.DSH_AG_UI_PROVIDER ||
+        !process.env.DSH_AG_UI_MODEL ||
+        !process.env.DSH_AG_UI_SHARED_SECRET
+      config:
+        provider: !!js process.env.DSH_AG_UI_PROVIDER
+        model: !!js process.env.DSH_AG_UI_MODEL
+        sharedSecret: !!js process.env.DSH_AG_UI_SHARED_SECRET
+        path: !!js process.env.DSH_AG_UI_PATH || '/ag-ui'
+
+    - id: ag-ui-invariant
+      name: dsh-ag-ui/invariant
+      disabled: !!js >-
+        !process.env.DSH_AG_UI_PROVIDER ||
+        !process.env.DSH_AG_UI_MODEL ||
+        !process.env.DSH_AG_UI_SHARED_SECRET
