@@ -271,6 +271,15 @@ The package ships the framework-free BFF plugin as `dsh-ag-ui/dojo-host`. The ke
 
 The upstream Dojo integration registry is static and has no `deepseek-harness` entry yet, so local upstream testing temporarily reuses the Claude Agent SDK TypeScript menu entry purely as a URL/path alias. The alias disappears once the upstream integration PR registering a DeepSeek Harness entry is accepted; no Claude runtime, model, or credential is involved.
 
+The recording below shows the shared-state feature on the upstream Dojo demo viewer against this repository's keyless fixture. Both chat turns flow through the gateway: the first reads the shared state, the second emits `STATE_SNAPSHOT` events that rewrite the recipe form. Playback is sped up 3x and carries English captions.
+
+<video controls muted playsinline width="800">
+  <source src="docs/demo/dojo-shared-state.mp4" type="video/mp4" />
+  <track src="docs/demo/dojo-shared-state.vtt" kind="captions" srclang="en" label="English" default />
+</video>
+
+If the inline player does not render on this host, download [docs/demo/dojo-shared-state.mp4](docs/demo/dojo-shared-state.mp4) (captions: [docs/demo/dojo-shared-state.vtt](docs/demo/dojo-shared-state.vtt)).
+
 ## Embedded adapter
 
 The separate [`dsh-ag-ui-adapter`](packages/dsh-ag-ui-adapter) package is the embedded counterpart of this deployment-form Gateway. A `DshAgent` (`AbstractAgent` subclass) spawns a DSH micro-host child — a Cordis overlay composing the loopback webserver on an ephemeral port, this Gateway with a per-process generated secret, and the caller's agent-spine and model rows — and passes `run()` through loopback HTTP using the official client primitives, adding no protocol translation code. The host starts lazily on the first run, can idle-shut-down, and never outlives the embedding process. See its README for usage, plugin row resolution, environment fallback, lifecycle, and the trust posture of the embedded shape.

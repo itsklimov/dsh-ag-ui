@@ -271,6 +271,15 @@ Package 以 `dsh-ag-ui/dojo-host` 发布 framework-free BFF plugin。Keyless scr
 
 Upstream Dojo 的 integration registry 是静态源码，目前没有 `deepseek-harness` 条目，因此本地 upstream 测试暂时复用 Claude Agent SDK TypeScript 菜单项作为纯 URL/path 别名。该别名在注册 DeepSeek Harness 条目的 upstream integration PR 被接受后即会消失；过程中不涉及任何 Claude 运行时、模型或凭据。
 
+下面的录像展示 upstream Dojo demo viewer 上的 shared-state feature 对接本仓库 keyless fixture 的效果。两轮对话都经过网关：第一轮读取共享状态，第二轮发出改写菜谱表单的 `STATE_SNAPSHOT` 事件。播放速度为 3 倍速并附英文字幕。
+
+<video controls muted playsinline width="800">
+  <source src="docs/demo/dojo-shared-state.mp4" type="video/mp4" />
+  <track src="docs/demo/dojo-shared-state.vtt" kind="captions" srclang="en" label="English" default />
+</video>
+
+若当前宿主不渲染内嵌播放器，可下载 [docs/demo/dojo-shared-state.mp4](docs/demo/dojo-shared-state.mp4)（字幕：[docs/demo/dojo-shared-state.vtt](docs/demo/dojo-shared-state.vtt)）。
+
 ## 嵌入适配器
 
 独立的 [`dsh-ag-ui-adapter`](packages/dsh-ag-ui-adapter) 包是本部署形态网关的嵌入形态对应物。`DshAgent`（`AbstractAgent` 子类）spawn 一个 DSH 微型 Host 子进程——由 Cordis overlay 组合环回 webserver（临时端口）、本网关（按进程生成的 secret）以及调用方的 agent spine 与 model rows——并通过环回 HTTP 以官方 client 原语实现 `run()`，不新增任何协议翻译代码。Host 在首次 run 时才惰性启动，可按空闲窗口自动关闭，且绝不会比宿主进程活得更久。用法、plugin row 解析、环境变量回退、生命周期与嵌入形态的信任姿态见其 README。

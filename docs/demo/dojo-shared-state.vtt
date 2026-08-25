@@ -1,0 +1,16 @@
+WEBVTT
+
+00:00:00.000 --> 00:00:00.900
+A plain recipe form — local state only, nothing shared yet.
+
+00:00:00.900 --> 00:00:01.500
+Ask the agent to list the current ingredients.
+
+00:00:01.500 --> 00:00:02.400
+The agent reads the shared state through the DSH gateway.
+
+00:00:02.400 --> 00:00:03.100
+One click asks the agent to write the recipe.
+
+00:00:03.100 --> 00:00:04.160
+STATE_SNAPSHOT events rewrite the form: title, ingredients, steps.
