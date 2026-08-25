@@ -87,6 +87,8 @@ A later Profile patch replaces the bundle row's complete `config`; include every
 | `path` | `/ag-ui` | Exact Host HTTP route |
 | `provider` | required | Registered DSH model provider route |
 | `model` | required | Model ID owned by the provider |
+| `agentPreset` | none | Deployment-default agent preset id composed into every thread |
+| `tenantPresets` | `{}` | Per-tenant preset ids taking precedence over `agentPreset` |
 | `sharedSecret` | required | Bearer secret shared only with the trusted BFF |
 | `tenantHeader` | `x-dsh-tenant-id` | Trusted tenant identity header |
 | `userHeader` | `x-dsh-user-id` | Trusted user identity header |
@@ -108,6 +110,8 @@ A later Profile patch replaces the bundle row's complete `config`; include every
 | `maxRunEvents` | `4096` | Maximum events retained per run |
 | `maxRunEventBytes` | `2097152` | Maximum retained event bytes per run |
 | `maxRunsPerThread` | `32` | Maximum retained run ledger entries per thread |
+
+`agentPreset` composes each thread's agent from the host's agent-presets roster (mount the roster plugin before this Gateway); an unresolvable id fails Gateway activation loudly, a per-tenant entry overrides the deployment default for that tenant's threads, and a resumed thread keeps the composition its own durable session recorded. Without `agentPreset`, threads keep the host composition unchanged.
 
 `maxRunEvents` must retain at least the mandatory opening and terminal events. `maxRunEventBytes` bounds the complete retained Run record, including `RUN_STARTED` and its terminal event, and must be large enough for the configured maximum identity length. A non-loopback DSH WebServer requires `allowNonLoopback: true`. Prefer a loopback Gateway behind a same-host authenticated BFF.
 

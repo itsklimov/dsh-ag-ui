@@ -1,0 +1,2 @@
+- id: beta-tool
+  name: './tool.mjs'

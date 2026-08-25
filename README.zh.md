@@ -87,6 +87,8 @@ Bundle 插入一个 Host-plane `ag-ui` row 来加载 Gateway service。Package �
 | `path` | `/ag-ui` | 精确 Host HTTP route |
 | `provider` | 必填 | 已注册 DSH model provider route |
 | `model` | 必填 | Provider 持有的 model ID |
+| `agentPreset` | 无 | 组合进每个线程的部署级默认 agent preset id |
+| `tenantPresets` | `{}` | 按租户覆盖 `agentPreset` 的 preset id 映射 |
 | `sharedSecret` | 必填 | 仅与可信 BFF 共享的 bearer secret |
 | `tenantHeader` | `x-dsh-tenant-id` | 可信 tenant identity header |
 | `userHeader` | `x-dsh-user-id` | 可信 user identity header |
@@ -108,6 +110,8 @@ Bundle 插入一个 Host-plane `ag-ui` row 来加载 Gateway service。Package �
 | `maxRunEvents` | `4096` | 每个 run 最大保留 events |
 | `maxRunEventBytes` | `2097152` | 每个 run 最大保留 event bytes |
 | `maxRunsPerThread` | `32` | 每个 thread 最大 run ledger entries |
+
+`agentPreset` 让每个线程的 agent 从宿主的 agent-presets roster 组合而来（需在本 Gateway 之前挂载 roster 插件）；无法解析的 id 会让 Gateway 激活响亮失败，按租户条目覆盖该租户线程的部署默认值，而恢复的线程保持其持久 session 自己记录的组合。不配置 `agentPreset` 时，线程保持宿主组合不变。
 
 `maxRunEvents` 必须至少容纳 mandatory opening 与 terminal events。`maxRunEventBytes` 会限制包含 `RUN_STARTED` 和 terminal event 在内的完整 retained Run record，并且必须足以容纳已配置的最大 identity length。非 loopback DSH WebServer 需要设置 `allowNonLoopback: true`。推荐把 Gateway 保持在 loopback，并放在同 Host 的 authenticated BFF 后面。
 

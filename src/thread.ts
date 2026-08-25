@@ -21,6 +21,7 @@ import { isDeepStrictEqual } from 'node:util'
 import { AgUiGatewayError } from './errors.ts'
 import { jsonBytes, valueDigest } from './json.ts'
 import { durableUserId, SessionProjection, STATE_TOOL_NAME } from './projection.ts'
+import { agentPresetsOf, sessionPresetOf } from './presets.ts'
 import { RunController, type RunRecord } from './run.ts'
 import type { AgUiPrincipal, AgUiThreadIdentity } from './types.ts'
 
@@ -37,6 +38,8 @@ const SCHEDULING_PROBE = {
 export interface ThreadOptions {
   readonly provider: string
   readonly model: string
+  /** Preset id composed into the thread's agents; absent keeps the host composition. */
+  readonly presetId?: string
   readonly frontendToolTimeoutMs: number
   readonly threadIdleMs: number
   readonly maxRunEvents: number
@@ -122,7 +125,9 @@ export class ThreadBinding {
 
   private async restoreOrCreate(): Promise<AgentHandle> {
     const agentOptions = { provider: this.options.provider, model: this.options.model }
-    const create = () => this.ctx.agents.create({ sessionId: this.sessionId, agentOptions, setup: this.agentSetup() })
+    // the resolved preset is snapshotted into durable meta at creation, before any await
+    const meta = this.options.presetId === undefined ? {} : { meta: { agentPreset: this.options.presetId } }
+    const create = () => this.ctx.agents.create({ sessionId: this.sessionId, ...meta, agentOptions, setup: this.agentSetup() })
     const persistence = sessionPersistenceOf(this.ctx)
     if (persistence === undefined) return create()
     try {
@@ -136,8 +141,8 @@ export class ThreadBinding {
     }
   }
 
-  private agentSetup(): (agentCtx: Context) => void {
-    return (agentCtx) => {
+  private agentSetup(): (agentCtx: Context) => Promise<void> {
+    return async (agentCtx) => {
       const agent = agentCtx.agent
       /* v8 ignore next -- AgentRegistry setup always carries its unpublished Agent association. */
       if (agent === undefined) throw new Error('ag-ui: unpublished Agent context has no Agent association')
@@ -155,7 +160,21 @@ export class ThreadBinding {
         if (subject === agent) this.onAgentError(error)
       })
       agentCtx.on('tools/change', () => { this.checkGlobalCollisions() })
+      // mounting inside the setup window rolls a broken preset back with the whole creation
+      await this.mountPreset(agentCtx, agent)
     }
+  }
+
+  /** Compose the agent from its preset; a thread resumes the composition its own log recorded. */
+  private async mountPreset(agentCtx: Context, agent: Agent): Promise<void> {
+    const presets = agentPresetsOf(this.ctx)
+    if (presets === undefined) {
+      if (this.options.presetId === undefined) return
+      // a roster that vanished after activation stays loud instead of composing from host tools
+      throw new Error('ag-ui: the configured agent preset cannot mount because no agent-presets roster is active')
+    }
+    const presetId = sessionPresetOf(agent.session) ?? this.options.presetId
+    if (presetId !== undefined) await presets.mount(agentCtx, presetId)
   }
 
   /** Rebuild idempotency bookkeeping from one recovered durable log. */

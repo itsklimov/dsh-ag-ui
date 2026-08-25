@@ -13,6 +13,7 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-tools'
 import { AgUiGatewayError, publicError } from './errors.ts'
 import { jsonBytes, jsonDepth, requestDigest, utf8Bytes } from './json.ts'
+import { agentPresetsOf } from './presets.ts'
 import { replayRun } from './run.ts'
 import { durableSessionId } from './session-id.ts'
 import { ThreadBinding, type ThreadOptions } from './thread.ts'
@@ -32,6 +33,10 @@ export interface Config {
   provider: string
   /** Model id for Gateway-created Agents. */
   model: string
+  /** Deployment-default preset id composed into every thread without a tenant override. */
+  agentPreset?: string
+  /** Per-tenant preset ids taking precedence over {@link Config.agentPreset}. */
+  tenantPresets?: Record<string, string>
   /** Bearer secret shared only with the trusted BFF. */
   sharedSecret: string
   /** Header carrying the BFF-authenticated tenant id. */
@@ -81,6 +86,8 @@ export const Config: z<Config> = z.object({
   path: z.string().default('/ag-ui'),
   provider: z.string().required(),
   model: z.string().required(),
+  agentPreset: z.string(),
+  tenantPresets: z.dict(z.string()),
   sharedSecret: z.string().required(),
   tenantHeader: z.string().default('x-dsh-tenant-id'),
   userHeader: z.string().default('x-dsh-user-id'),
@@ -119,6 +126,10 @@ export class AgUiGateway extends Service implements AgUiAgentLookup {
   private readonly creations = new Map<string, Promise<ThreadBinding>>()
   private readonly owners = new WeakMap<Agent, ThreadBinding>()
   private readonly resolved: Required<Config>
+  /** Canonical deployment-default preset id, resolved when activation validated it. */
+  private defaultPresetId: string | undefined
+  /** Canonical preset ids per configured tenant, resolved when activation validated them. */
+  private readonly tenantPresetIds = new Map<string, string>()
 
   /**
    * Register the route and own every Agent created through it.
@@ -140,6 +151,25 @@ export class AgUiGateway extends Service implements AgUiAgentLookup {
         await this.disposeAll()
       }
     }, 'ag-ui.routeAndThreads')
+  }
+
+  /**
+   * Fail plugin activation loudly when a configured preset id resolves to no
+   * roster row — a thread would otherwise compose silently from host tools.
+   */
+  async [Service.init](): Promise<void> {
+    const presets = agentPresetsOf(this.ctx)
+    const overrides = Object.entries(this.resolved.tenantPresets)
+    if (presets === undefined) {
+      if (this.resolved.agentPreset === undefined && overrides.length === 0) return
+      throw new Error('ag-ui: agentPreset is configured but no agent-presets roster is mounted; mount the roster before this Gateway')
+    }
+    if (this.resolved.agentPreset !== undefined) {
+      this.defaultPresetId = (await presets.resolve(this.resolved.agentPreset)).id
+    }
+    for (const [tenantId, presetId] of overrides) {
+      this.tenantPresetIds.set(tenantId, (await presets.resolve(presetId)).id)
+    }
   }
 
   /**
@@ -224,9 +254,11 @@ export class AgUiGateway extends Service implements AgUiAgentLookup {
   }
 
   private async createBinding(key: string, principal: AgUiPrincipal, threadId: string): Promise<ThreadBinding> {
+    const presetId = this.tenantPresetIds.get(principal.tenantId) ?? this.defaultPresetId
     const options: ThreadOptions = {
       provider: this.resolved.provider,
       model: this.resolved.model,
+      ...(presetId === undefined ? {} : { presetId }),
       frontendToolTimeoutMs: this.resolved.frontendToolTimeoutMs,
       threadIdleMs: this.resolved.threadIdleMs,
       maxRunEvents: this.resolved.maxRunEvents,
