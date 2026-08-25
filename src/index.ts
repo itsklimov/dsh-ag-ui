@@ -21,6 +21,8 @@ import type { AgUiAgentLookup, AgUiPrincipal, AgUiThreadIdentity } from './types
 
 export type { AgUiAgentLookup, AgUiPrincipal, AgUiThreadIdentity } from './types.ts'
 export { AgUiGatewayError } from './errors.ts'
+export { TOOL_VIEW_NAME } from './tool-view.ts'
+export type { ToolViewEnvelope, ToolViewPhase } from './tool-view.ts'
 
 const HEADER_NAME = /^[a-z0-9-]+$/
 const IDENTITY = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/

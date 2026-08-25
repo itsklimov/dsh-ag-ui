@@ -1,6 +1,15 @@
-import { EventType, type BaseEvent, type Message as AgUiMessage } from '@ag-ui/core'
+import { EventType, type BaseEvent, type CustomEvent, type Message as AgUiMessage } from '@ag-ui/core'
 import type { ContentBlock, ToolResultBlock } from '@deepseek-ai/dsh-llm'
 import { type SessionId, type SessionEvent, type TurnEndReason } from '@deepseek-ai/dsh-session'
+import {
+  parseToolArguments,
+  toolViewCallEnvelope,
+  toolViewEvent,
+  toolViewResultEnvelope,
+  toolViewResultOf,
+  type ToolPresenter,
+  type ToolViewEnvelope,
+} from './tool-view.ts'
 
 /** Reserved model-facing Tool that shallow-merges shared application state. */
 export const STATE_TOOL_NAME = 'ag_ui_update_state'
@@ -80,11 +89,12 @@ export class SessionProjection {
   private readonly toolCallLifecycles = new Map<string, ToolCallLifecycle>()
   private readonly stepProgress = new Map<string, StepToolProgress>()
   private readonly serverResultCallIds = new Set<string>()
+  private readonly callArguments = new Map<string, unknown>()
 
   /** Shared application state carried between runs; committed by state-tool results. */
   sharedState: unknown
 
-  constructor(private readonly sessionId: SessionId) {}
+  constructor(private readonly sessionId: SessionId, private readonly presenter: ToolPresenter) {}
 
   /**
    * Translate one session event against the active run's DSH turn.
@@ -149,6 +159,12 @@ export class SessionProjection {
           name: event.data.name,
         })
         if (event.data.name === STATE_TOOL_NAME) return EMPTY_STEP
+        const args = parseToolArguments(event.data.arguments)
+        this.callArguments.set(callId, args)
+        // the client presents its own Tools, so only host and preset calls carry a card
+        const view = this.presenter.isFrontendTool(event.data.name)
+          ? []
+          : [toolViewEvent(toolViewCallEnvelope(callId, event.data.name, args, this.presenter))]
         return {
           events: [
             {
@@ -159,6 +175,7 @@ export class SessionProjection {
             },
             { type: EventType.TOOL_CALL_ARGS, toolCallId: callId, delta: event.data.arguments },
             { type: EventType.TOOL_CALL_END, toolCallId: callId },
+            ...view,
           ],
         }
       }
@@ -167,6 +184,8 @@ export class SessionProjection {
         const callId = String(block.toolCallId)
         const lifecycle = this.toolCallLifecycles.get(callId)
         this.toolCallLifecycles.delete(callId)
+        const args = this.callArguments.get(callId)
+        this.callArguments.delete(callId)
         if (lifecycle?.kind === 'state') {
           const commit = lifecycle.commit
           if (commit !== undefined && !block.isError && commit.changed) {
@@ -177,14 +196,19 @@ export class SessionProjection {
         }
         this.serverResultCallIds.add(callId)
         if (lifecycle?.kind === 'frontend' || lifecycle?.kind === 'awaiting') return EMPTY_STEP
+        const result = {
+          type: EventType.TOOL_CALL_RESULT,
+          messageId: resultMessageId(this.sessionId, callId),
+          toolCallId: callId,
+          content: renderToolResult(block),
+          role: 'tool',
+        }
+        if (lifecycle === undefined) return { events: [result] }
         return {
-          events: [{
-            type: EventType.TOOL_CALL_RESULT,
-            messageId: resultMessageId(this.sessionId, callId),
-            toolCallId: callId,
-            content: renderToolResult(block),
-            role: 'tool',
-          }],
+          events: [
+            result,
+            toolViewEvent(toolViewResultEnvelope(callId, lifecycle.name, args, toolViewResultOf(block, event.data.meta), this.presenter)),
+          ],
         }
       }
       case 'turn/end': {
@@ -281,7 +305,10 @@ export class SessionProjection {
   /** Drop call bookkeeping for one finished turn. */
   clearTurn(turn: number): void {
     for (const [callId, lifecycle] of this.toolCallLifecycles) {
-      if (lifecycle.turn === turn) this.toolCallLifecycles.delete(callId)
+      if (lifecycle.turn === turn) {
+        this.toolCallLifecycles.delete(callId)
+        this.callArguments.delete(callId)
+      }
     }
     for (const key of this.stepProgress.keys()) {
       if (key.startsWith(`${String(turn)}:`)) this.stepProgress.delete(key)
@@ -324,6 +351,38 @@ export class SessionProjection {
       }
     }
     return messages
+  }
+
+  /**
+   * Derive the settled card projection of one durable log: a result envelope
+   * for every completed backend tool call, mirroring the message snapshot,
+   * which shows completed calls only. The same evaluator and inputs as the
+   * live path, so a cold transcript read renders the identical cards. The
+   * reserved state tool, client-owned frontend Tools, and calls whose Tool no
+   * longer resolves in the owning scope — a crash-materialized frontend call
+   * after a restart — stay excluded.
+   * @param events - the session's durable event log, in order.
+   * @returns CUSTOM `dsh:tool:view` events for the completed backend calls.
+   */
+  toolViewEvents(events: readonly SessionEvent[]): CustomEvent[] {
+    const envelopes: ToolViewEnvelope[] = []
+    const calls = new Map<string, { toolName: string, args: unknown }>()
+    for (const event of events) {
+      if (event.type === 'tool/call') {
+        calls.set(String(event.data.callId), { toolName: event.data.name, args: parseToolArguments(event.data.arguments) })
+      } else if (event.type === 'tool/result') {
+        const block = event.data.message.content[0]
+        const callId = String(block.toolCallId)
+        const call = calls.get(callId)
+        if (call === undefined) continue
+        calls.delete(callId)
+        if (call.toolName === STATE_TOOL_NAME
+          || this.presenter.isFrontendTool(call.toolName)
+          || this.presenter.resolve(call.toolName) === undefined) continue
+        envelopes.push(toolViewResultEnvelope(callId, call.toolName, call.args, toolViewResultOf(block, event.data.meta), this.presenter))
+      }
+    }
+    return envelopes.map(toolViewEvent)
   }
 
   private textProjection(turn: number, step: number): TextProjection {

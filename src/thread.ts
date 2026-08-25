@@ -23,6 +23,7 @@ import { jsonBytes, valueDigest } from './json.ts'
 import { durableUserId, SessionProjection, STATE_TOOL_NAME } from './projection.ts'
 import { agentPresetsOf, sessionPresetOf } from './presets.ts'
 import { RunController, type RunRecord } from './run.ts'
+import type { ToolPresenter } from './tool-view.ts'
 import type { AgUiPrincipal, AgUiThreadIdentity } from './types.ts'
 
 const FRONTEND_TOOL_NAME = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/
@@ -83,6 +84,11 @@ export class ThreadBinding {
   readonly identity: AgUiThreadIdentity
   /** Pure session-event to wire-event translation owned by this thread. */
   private readonly projection: SessionProjection
+  /** Presenter seam: definitions resolve in the owning Agent's scope; client Tools present themselves. */
+  private readonly presenter: ToolPresenter = {
+    resolve: (name) => this.ctx.tools.get(name, this.liveAgent),
+    isFrontendTool: (name) => this.frontendTools.has(name),
+  }
   /** Whether an announced Tool would still start while a parked call holds the pool. */
   private readonly startsWhileParked = (name: string): boolean =>
     this.ctx.tools.executionMode({ ...SCHEDULING_PROBE, name, agent: this.liveAgent }).kind === 'parallel'
@@ -112,7 +118,7 @@ export class ThreadBinding {
   ) {
     this.identity = { principal, threadId }
     this.sessionId = sessionId
-    this.projection = new SessionProjection(sessionId)
+    this.projection = new SessionProjection(sessionId, this.presenter)
   }
 
   /** Create the Agent — resuming a persisted session when the host configured one — and install scoped listeners before publication. */
@@ -259,6 +265,8 @@ export class ThreadBinding {
       type: EventType.MESSAGES_SNAPSHOT,
       messages: this.projection.messagesSnapshot(this.liveAgent.session.events, id => this.userMessageIds.get(id)),
     })
+    // the transcript's settled cards ride beside the snapshot, re-derived from the same durable log
+    for (const view of this.projection.toolViewEvents(this.liveAgent.session.events)) controller.emit(view)
     // a snapshot that overflowed the run budget already settled the run
     if (controller.record.state !== 'active') return
     // a restarted thread reports its interrupted turn once so the client can drop parked calls

@@ -1,8 +1,20 @@
 import { describe, expect, it } from 'vitest'
-import { EventType } from '@ag-ui/core'
+import { EventType, type BaseEvent } from '@ag-ui/core'
 import { CallId, createAssistantMessage, createToolResultMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
+import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { durableUserId, SessionProjection, STATE_TOOL_NAME, type ToolCallLifecycle } from '../src/projection.ts'
+import { TOOL_VIEW_NAME, type ToolPresenter, type ToolViewEnvelope } from '../src/tool-view.ts'
+
+/** Presenter stub: nothing resolves and no client tools, so every card takes the generic fallback. */
+const presenter: ToolPresenter = { resolve: () => undefined, isFrontendTool: () => false }
+
+/** The card envelope of one projection step, which always trails its standard events. */
+function trailingEnvelope(events: readonly BaseEvent[]): ToolViewEnvelope {
+  const last = events.at(-1)
+  if (last?.type !== EventType.CUSTOM) throw new Error('expected a trailing tool view card event')
+  return last.value as ToolViewEnvelope
+}
 
 function backendLifecycle(projection: SessionProjection, callId: string): ToolCallLifecycle & { kind: 'backend' } {
   const lifecycle = projection.lifecycleOf(callId)
@@ -73,7 +85,7 @@ function userMessage(durableId: string, text: string, kind = 'user'): SessionEve
 
 describe('SessionProjection text', () => {
   it('opens one message across deltas and closes it at the assembled message', () => {
-    const projection = new SessionProjection(sessionId)
+    const projection = new SessionProjection(sessionId, presenter)
     const first = projection.project(event('assistant/chunk', {
       turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'hello ' },
     }), 1)
@@ -92,7 +104,7 @@ describe('SessionProjection text', () => {
   })
 
   it('projects an assembled-only message as one start/content/end triple', () => {
-    const projection = new SessionProjection(sessionId)
+    const projection = new SessionProjection(sessionId, presenter)
     const step = projection.project(textMessage('assembled only'), 1)
     expect(step.events).toEqual([
       { type: EventType.TEXT_MESSAGE_START, messageId, role: 'assistant' },
@@ -102,7 +114,7 @@ describe('SessionProjection text', () => {
   })
 
   it('emits nothing for a text-less step and ignores non-text chunks', () => {
-    const projection = new SessionProjection(sessionId)
+    const projection = new SessionProjection(sessionId, presenter)
     const empty = projection.project(textMessage(''), 1)
     const ignored = projection.project(event('assistant/chunk', {
       turn: 1, step: 2, chunk: { type: 'block-start', index: 0, blockType: 'text' },
@@ -113,18 +125,30 @@ describe('SessionProjection text', () => {
 })
 
 describe('SessionProjection tool calls', () => {
-  it('projects a backend call start/args/end triple and its durable result', () => {
-    const projection = new SessionProjection(sessionId)
+  it('projects a backend call start/args/end triple, its card, and its durable result', () => {
+    const projection = new SessionProjection(sessionId, presenter)
     const call = projection.project(toolCall('call-1', 'backend_tool'), 1)
     expect(call.events.map(item => item.type)).toEqual([
       EventType.TOOL_CALL_START,
       EventType.TOOL_CALL_ARGS,
       EventType.TOOL_CALL_END,
+      EventType.CUSTOM,
     ])
     expect(call.events[0]).toMatchObject({
       toolCallId: 'call-1',
       toolCallName: 'backend_tool',
       parentMessageId: messageId,
+    })
+    expect(call.events[3]).toEqual({
+      type: EventType.CUSTOM,
+      name: TOOL_VIEW_NAME,
+      value: {
+        version: 1,
+        callId: 'call-1',
+        toolName: 'backend_tool',
+        phase: 'call',
+        card: { card: 'generic', title: 'backend_tool', rawInput: { x: 1 } },
+      },
     })
 
     const result = projection.project(toolResult('call-1'), 1)
@@ -134,20 +158,30 @@ describe('SessionProjection tool calls', () => {
       toolCallId: 'call-1',
       content: 'result of call-1',
       role: 'tool',
+    }, {
+      type: EventType.CUSTOM,
+      name: TOOL_VIEW_NAME,
+      value: {
+        version: 1,
+        callId: 'call-1',
+        toolName: 'backend_tool',
+        phase: 'result',
+        card: { card: 'generic' },
+      },
     }])
     expect(projection.consumeServerResult('call-1')).toBe(true)
     expect(projection.consumeServerResult('call-1')).toBe(false)
   })
 
   it('records the reserved state call without wire events', () => {
-    const projection = new SessionProjection(sessionId)
+    const projection = new SessionProjection(sessionId, presenter)
     const call = projection.project(toolCall('state-call', STATE_TOOL_NAME), 1)
     expect(call.events).toEqual([])
     expect(projection.lifecycleOf('state-call')).toMatchObject({ kind: 'state', turn: 1, step: 1 })
   })
 
   it('stays silent for a parked frontend call result but records its id', () => {
-    const projection = new SessionProjection(sessionId)
+    const projection = new SessionProjection(sessionId, presenter)
     projection.project(toolCall('frontend-call', 'ui_action'), 1)
     projection.markParked('frontend-call', backendLifecycle(projection, 'frontend-call'))
     expect(projection.project(toolResult('frontend-call'), 1).events).toEqual([])
@@ -155,9 +189,142 @@ describe('SessionProjection tool calls', () => {
   })
 })
 
+describe('SessionProjection tool view cards', () => {
+  /** Minimal definition whose declared intents echo their inputs. */
+  const definition = {
+    presentCall: (args: unknown) => ({ card: 'generic', title: `probing ${(args as { subject: string }).subject}`, kind: 'search' }),
+    presentResult: (args: unknown, result: { meta?: unknown }) => ({
+      card: 'generic',
+      title: `probed ${(args as { subject: string }).subject}`,
+      content: [{ type: 'text', text: `meta ${JSON.stringify(result.meta)}` }],
+    }),
+  } as unknown as ToolDefinition
+  const declaring: ToolPresenter = {
+    resolve: name => (name === 'view_tool' ? definition : undefined),
+    isFrontendTool: name => name === 'ui_action',
+  }
+
+  it('carries the declared call and result intents, including the durable meta', () => {
+    const projection = new SessionProjection(sessionId, declaring)
+    const call = projection.project(event('tool/call', {
+      turn: 1, step: 1, callId: CallId('view-1'), name: 'view_tool', arguments: '{"subject":"files"}',
+    }), 1)
+    expect(call.events.at(-1)).toMatchObject({
+      type: EventType.CUSTOM,
+      name: TOOL_VIEW_NAME,
+      value: {
+        version: 1,
+        callId: 'view-1',
+        toolName: 'view_tool',
+        phase: 'call',
+        card: { card: 'generic', title: 'probing files', kind: 'search' },
+      },
+    })
+    const result = projection.project(event('tool/result', {
+      turn: 1,
+      step: 1,
+      message: createToolResultMessage({ callId: CallId('view-1'), content: [{ type: 'text', text: 'raw' }] }),
+      meta: { kept: true },
+    }), 1)
+    expect(result.events.at(-1)).toMatchObject({
+      type: EventType.CUSTOM,
+      name: TOOL_VIEW_NAME,
+      value: {
+        phase: 'result',
+        card: { card: 'generic', title: 'probed files', content: [{ type: 'text', text: 'meta {"kept":true}' }] },
+      },
+    })
+  })
+
+  it('soft-falls throwing or absent intents to the generic card and keeps raw unparseable arguments', () => {
+    const throwing: ToolPresenter = {
+      resolve: name => (name === 'throwing'
+        ? {
+          presentCall: () => { throw new Error('boom') },
+          presentResult: () => { throw new Error('boom') },
+        } as unknown as ToolDefinition
+        : name === 'silent'
+          ? {} as ToolDefinition
+          : undefined),
+      isFrontendTool: () => false,
+    }
+    const projection = new SessionProjection(sessionId, throwing)
+    const malformed = projection.project(event('tool/call', {
+      turn: 1, step: 1, callId: CallId('bad-args'), name: 'throwing', arguments: '{oops',
+    }), 1)
+    expect(malformed.events.at(-1)).toMatchObject({
+      type: EventType.CUSTOM,
+      value: { phase: 'call', card: { card: 'generic', title: 'throwing', rawInput: '{oops' } },
+    })
+    const silent = projection.project(event('tool/call', {
+      turn: 1, step: 1, callId: CallId('silent-1'), name: 'silent', arguments: '{}',
+    }), 1)
+    expect(trailingEnvelope(silent.events).card).toEqual({ card: 'generic', title: 'silent', rawInput: {} })
+
+    projection.project(toolCall('throw-result', 'throwing'), 1)
+    const thrown = projection.project(toolResult('throw-result'), 1)
+    expect(trailingEnvelope(thrown.events).card).toEqual({ card: 'generic' })
+  })
+
+  it('excludes client-owned frontend calls from cards on the wire', () => {
+    const projection = new SessionProjection(sessionId, declaring)
+    const call = projection.project(toolCall('frontend-1', 'ui_action'), 1)
+    expect(call.events.map(item => item.type)).toEqual([
+      EventType.TOOL_CALL_START,
+      EventType.TOOL_CALL_ARGS,
+      EventType.TOOL_CALL_END,
+    ])
+  })
+
+  it('emits a bare result when its call position was never projected', () => {
+    const projection = new SessionProjection(sessionId, presenter)
+    const result = projection.project(toolResult('orphan'), 1)
+    expect(result.events.map(item => item.type)).toEqual([EventType.TOOL_CALL_RESULT])
+  })
+
+  it('re-derives identical settled cards from a cold log, skipping excluded, unresolvable, and unresulted calls', () => {
+    const projection = new SessionProjection(sessionId, declaring)
+    const log = [
+      event('tool/call', {
+        turn: 1, step: 1, callId: CallId('view-1'), name: 'view_tool', arguments: '{"subject":"files"}',
+      }),
+      event('tool/result', {
+        turn: 1,
+        step: 1,
+        message: createToolResultMessage({ callId: CallId('view-1'), content: [{ type: 'text', text: 'raw' }] }),
+        meta: { kept: true },
+      }),
+      toolCall('state-1', STATE_TOOL_NAME),
+      toolResult('state-1'),
+      toolCall('client-1', 'ui_action'),
+      toolResult('client-1'),
+      toolCall('gone-1', 'vanished_tool'),
+      toolResult('gone-1'),
+      toolCall('unresulted', 'view_tool'),
+    ]
+    const cold = projection.toolViewEvents(log)
+    expect(cold).toEqual([{
+      type: EventType.CUSTOM,
+      name: TOOL_VIEW_NAME,
+      value: {
+        version: 1,
+        callId: 'view-1',
+        toolName: 'view_tool',
+        phase: 'result',
+        card: { card: 'generic', title: 'probed files', content: [{ type: 'text', text: 'meta {"kept":true}' }] },
+      },
+    }])
+  })
+
+  it('skips a durable result whose call event is absent', () => {
+    const projection = new SessionProjection(sessionId, declaring)
+    expect(projection.toolViewEvents([toolResult('orphan')])).toEqual([])
+  })
+})
+
 describe('SessionProjection shared state', () => {
   it('commits a changed state update after its durable result', () => {
-    const projection = new SessionProjection(sessionId)
+    const projection = new SessionProjection(sessionId, presenter)
     projection.project(toolCall('state-call', STATE_TOOL_NAME), 1)
     projection.sharedState = { count: 1 }
     projection.stageCommit('state-call', { value: { count: 2 }, changed: true })
@@ -167,17 +334,18 @@ describe('SessionProjection shared state', () => {
   })
 
   it('ignores commits staged for missing or non-state calls', () => {
-    const projection = new SessionProjection(sessionId)
+    const projection = new SessionProjection(sessionId, presenter)
     projection.project(toolCall('backend-call', 'backend_tool'), 1)
     projection.stageCommit('backend-call', { value: { count: 9 }, changed: true })
     projection.stageCommit('missing-call', { value: { count: 9 }, changed: true })
     expect(projection.lifecycleOf('backend-call')).toMatchObject({ kind: 'backend' })
     expect(projection.project(toolResult('backend-call'), 1).events).toEqual([
       expect.objectContaining({ type: EventType.TOOL_CALL_RESULT, toolCallId: 'backend-call' }),
+      expect.objectContaining({ type: EventType.CUSTOM }),
     ])
   })
 
-  it('skips unchanged and failed state results', () => {    const projection = new SessionProjection(sessionId)
+  it('skips unchanged and failed state results', () => {    const projection = new SessionProjection(sessionId, presenter)
     projection.sharedState = { count: 1 }
     projection.project(toolCall('state-unchanged', STATE_TOOL_NAME), 1)
     projection.stageCommit('state-unchanged', { value: { count: 1 }, changed: false })
@@ -192,7 +360,7 @@ describe('SessionProjection shared state', () => {
 
 describe('SessionProjection history snapshot', () => {
   it('derives the full history, skipping injected context, unmapped ids, and empty text', () => {
-    const projection = new SessionProjection(sessionId)
+    const projection = new SessionProjection(sessionId, presenter)
     const events = [
       event('user/message', {
         id: 'sys-1',
@@ -237,13 +405,13 @@ describe('SessionProjection run outcomes', () => {
       [{ kind: 'extension-reason' }, { kind: 'error', code: 'AGENT_EXECUTION_ERROR', message: 'The DSH turn ended with an unsupported reason.' }],
     ] as const
     for (const [reason, outcome] of cases) {
-      const projection = new SessionProjection(sessionId)
+      const projection = new SessionProjection(sessionId, presenter)
       expect(projection.project(event('turn/end', { turn: 1, reason }), 1).outcome).toEqual(outcome)
     }
   })
 
   it('ignores events outside the active turn and releases step slots at step end', () => {
-    const projection = new SessionProjection(sessionId)
+    const projection = new SessionProjection(sessionId, presenter)
     const nextTurnCall = event('tool/call', {
       turn: 2, step: 1, callId: CallId('other-turn'), name: 'backend_tool', arguments: '{}',
     })
@@ -253,7 +421,7 @@ describe('SessionProjection run outcomes', () => {
   })
 
   it('settles a park immediately when the step announced no further calls', () => {
-    const projection = new SessionProjection(sessionId)
+    const projection = new SessionProjection(sessionId, presenter)
     projection.project(toolCall('park-1', 'ui_action'), 1)
     expect(projection.parkSettleReady(1, 1, parallel)).toBe(false)
     projection.markParked('park-1', backendLifecycle(projection, 'park-1'))
@@ -261,7 +429,7 @@ describe('SessionProjection run outcomes', () => {
   })
 
   it('holds the park settle until every announced call streamed', () => {
-    const projection = new SessionProjection(sessionId)
+    const projection = new SessionProjection(sessionId, presenter)
     projection.project(assistantToolAnnouncement(1, 2), 1)
 
     projection.project(toolCall('park-1', 'ui_action'), 1)
@@ -280,7 +448,7 @@ describe('SessionProjection run outcomes', () => {
   })
 
   it('ignores awaiting marks on calls that never parked', () => {
-    const projection = new SessionProjection(sessionId)
+    const projection = new SessionProjection(sessionId, presenter)
     projection.project(toolCall('server-2', 'backend_tool'), 1)
     projection.markAwaitingResult('server-2')
     projection.markAwaitingResult('missing-call')
@@ -288,7 +456,7 @@ describe('SessionProjection run outcomes', () => {
   })
 
   it('settles once every announced call streamed or parked', () => {
-    const projection = new SessionProjection(sessionId)
+    const projection = new SessionProjection(sessionId, presenter)
     projection.project(assistantToolAnnouncement(1, 2), 1)
     projection.project(toolCall('park-1', 'ui_action'), 1)
     projection.markParked('park-1', backendLifecycle(projection, 'park-1'))
@@ -300,7 +468,7 @@ describe('SessionProjection run outcomes', () => {
   })
 
   it('clears step progress for one finished turn only', () => {
-    const projection = new SessionProjection(sessionId)
+    const projection = new SessionProjection(sessionId, presenter)
     projection.project(assistantToolAnnouncement(1, 1), 1)
     projection.project(toolCall('turn-1-park', 'ui_action'), 1)
     projection.markParked('turn-1-park', backendLifecycle(projection, 'turn-1-park'))
@@ -315,7 +483,7 @@ describe('SessionProjection run outcomes', () => {
   })
 
   it('clears call lifecycles only for the finished turn', () => {
-    const projection = new SessionProjection(sessionId)
+    const projection = new SessionProjection(sessionId, presenter)
     projection.project(toolCall('turn-1-call', 'backend_tool'), 1)
     projection.project(event('tool/call', {
       turn: 2, step: 1, callId: CallId('turn-2-call'), name: 'backend_tool', arguments: '{}',
@@ -328,7 +496,7 @@ describe('SessionProjection run outcomes', () => {
 
 describe('SessionProjection cold recovery', () => {
   it('recovers derived users and recorded server results from a durable log', () => {
-    const projection = new SessionProjection(sessionId)
+    const projection = new SessionProjection(sessionId, presenter)
     const recovery = projection.recoverFrom([
       userMessage('sys-1', 'injected context', 'system'),
       userMessage(durableUserId('client-user-1'), 'hello'),
@@ -348,18 +516,18 @@ describe('SessionProjection cold recovery', () => {
   it('marks the thread interrupted only when the last turn ended interrupted', () => {
     const turnEnd = (turn: number, kind: string): SessionEvent =>
       event('turn/end', { turn, reason: { kind } })
-    const interrupted = new SessionProjection(sessionId).recoverFrom([
+    const interrupted = new SessionProjection(sessionId, presenter).recoverFrom([
       turnEnd(1, 'interrupted'),
     ])
     expect(interrupted.interrupted).toBe(true)
 
-    const recovered = new SessionProjection(sessionId).recoverFrom([
+    const recovered = new SessionProjection(sessionId, presenter).recoverFrom([
       turnEnd(1, 'interrupted'),
       turnEnd(2, 'completed'),
     ])
     expect(recovered.interrupted).toBe(false)
 
-    const stale = new SessionProjection(sessionId).recoverFrom([
+    const stale = new SessionProjection(sessionId, presenter).recoverFrom([
       turnEnd(1, 'interrupted'),
       turnEnd(2, 'completed'),
       turnEnd(3, 'interrupted'),

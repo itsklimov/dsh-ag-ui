@@ -21,6 +21,7 @@
 - 由 `RunAgentInput.tools` 提供的 Agent-scoped browser Tools
 - 跨 HTTP runs 的 Frontend Tool Promise park 与 ToolMessage continuation
 - 通过 `RunAgentInput.state`、`ag_ui_update_state` 和 `STATE_SNAPSHOT` 实现的双向 shared state
+- 后端 Tool 调用以带版本的 `dsh:tool:view` CUSTOM 事件携带 presenter card，live 与冷回放一致
 - 覆盖五项标准 AG-UI feature 的 keyless Dojo-compatible example
 - Run 和 message 幂等
 - Request、context、Tool schema、event buffer、thread 和 run ledger 上限
@@ -269,6 +270,26 @@ Browser Tool name 必须匹配：
 该保守子集遵循常见 model-provider function-name limits；AG-UI 本身并不要求这条精确正则。`ag_ui_update_state` 是 protocol shared state 的保留名。Browser Tool parameter 必须使用 DSH Tools 实际执行验证的 object-rooted JSON Schema 子集。Gateway 拒绝与 inherited/global Tool 冲突的 name，并仅在精确 Agent 的 Tool scope 注册已接受 definition。
 
 Backend Tool result 会发出 `TOOL_CALL_RESULT`。Frontend Tool result 不在 AG-UI wire 上回显，因为浏览器已经追加 ToolMessage；DSH 仍会记录真实 durable `tool/result`。
+
+## Tool view cards
+
+每个后端 Tool 调用都会在标准 tool 事件旁携带其 DSH render-intent card，即名为 `dsh:tool:view` 的 CUSTOM 事件：
+
+```json
+{
+  "version": 1,
+  "callId": "call-42",
+  "toolName": "read_file",
+  "phase": "call",
+  "card": { "card": "generic", "title": "Reading src/index.ts", "kind": "read" }
+}
+```
+
+- Gateway 在实际执行调用的 Agent scope 内解析 Tool definition，再求值其 `presentCall`（pending 状态，`TOOL_CALL_END` 之后发出）与 `presentResult`（completed 状态，`TOOL_CALL_RESULT` 之后发出）intent。二者都是入参与 durable result 的纯函数，包含该 Tool 的 `output.presentationMeta` 投影进 session log 的 presentation metadata。
+- 未声明 intent、intent 返回 undefined 或 intent 抛错的 Tool 会软回退到 generic card：pending 状态为 `{ "card": "generic", "title": "<toolName>", "rawInput": <args> }`，completed 状态为 `{ "card": "generic" }`（保留 pending 标题，直接渲染原始 result）。
+- card 词汇表是 DSH provider-neutral 的 `ToolCallView`/`ToolResultView` union（`generic`、`terminal`、`diff`、`search`、`read`、`web` card），UI 无需按 Tool 名特判即可渲染。
+- 保留 Tool `ag_ui_update_state` 与客户端提供的 frontend Tool 被排除：state Tool 经 `STATE_SNAPSHOT` 投影，客户端本来就了解如何呈现自己的 Tool。
+- 每个 run 开始时，Gateway 会从 durable session log 重新推导整个转录的已结算 card——与 live 路径使用相同的求值器与输入——并在 `MESSAGES_SNAPSHOT` 之后立即发出，因此错过 live 流的客户端也能渲染出完全一致的 card。冷读取只会为仍在该 thread scope 内可解析的 Tool 重新推导 card，因此重启后由崩溃恢复物化的 frontend Tool 调用不会带 card。card 计入 run 的事件预算。
 
 ## 生命周期
 

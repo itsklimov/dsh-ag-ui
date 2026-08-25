@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import { HttpAgent, type Tool } from '@ag-ui/client'
-import { EventType, type BaseEvent } from '@ag-ui/core'
+import { EventType } from '@ag-ui/core'
 import { ask, lastAssistantText, pendingTool, reservePort, runAgentEvents, waitForServer } from './harness.ts'
 import { durableSessionId } from '../src/session-id.ts'
 

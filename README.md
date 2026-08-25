@@ -21,6 +21,7 @@ A community [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 
 - Agent-scoped browser Tools supplied by `RunAgentInput.tools`
 - Frontend Tool Promise parking and ToolMessage continuation across HTTP runs
 - Bidirectional shared state through `RunAgentInput.state`, `ag_ui_update_state`, and `STATE_SNAPSHOT`
+- Presenter cards for backend Tool calls as versioned `dsh:tool:view` CUSTOM events, live and on cold replay
 - A keyless Dojo-compatible example for five standard AG-UI features
 - Run and message idempotency
 - Bounded requests, context, Tool schemas, event buffers, threads, and run ledgers
@@ -269,6 +270,26 @@ Browser Tool names must match:
 This conservative subset follows common model-provider function-name limits; AG-UI itself does not require this exact regular expression. The name `ag_ui_update_state` is reserved for protocol shared state. Browser Tool parameters must use the object-rooted JSON Schema subset enforced by DSH Tools. The Gateway rejects collisions with inherited or global Tools and registers each accepted definition only in the exact Agent's Tool scope.
 
 Backend Tool results are emitted as `TOOL_CALL_RESULT`. Frontend Tool results are not echoed on the AG-UI wire because the browser already added the ToolMessage; DSH still records the real durable `tool/result`.
+
+## Tool view cards
+
+Every backend Tool call carries its DSH render-intent card next to the standard tool events, as a CUSTOM event named `dsh:tool:view`:
+
+```json
+{
+  "version": 1,
+  "callId": "call-42",
+  "toolName": "read_file",
+  "phase": "call",
+  "card": { "card": "generic", "title": "Reading src/index.ts", "kind": "read" }
+}
+```
+
+- The Gateway resolves the Tool definition in the Agent scope that executed the call, then evaluates its `presentCall` (pending state, emitted after `TOOL_CALL_END`) and `presentResult` (completed state, emitted after `TOOL_CALL_RESULT`) intents. Both are pure functions of the arguments and the durable result, including the presentation metadata the Tool's `output.presentationMeta` projected into its session log.
+- A Tool without intents, a returning intent, or a throwing intent soft-falls to the generic card: `{ "card": "generic", "title": "<toolName>", "rawInput": <args> }` for the pending state and `{ "card": "generic" }` (keep the pending title, render the raw result) for the completed state.
+- The card vocabulary is DSH's provider-neutral `ToolCallView`/`ToolResultView` union (`generic`, `terminal`, `diff`, `search`, `read`, `web` cards), so a UI renders cards without special-casing Tool names.
+- The reserved `ag_ui_update_state` Tool and client-provided frontend Tools are excluded: the state Tool projects through `STATE_SNAPSHOT`, and the client already knows how to present its own Tools.
+- At each run start, the Gateway re-derives the settled cards of the whole transcript from the durable session log — the same evaluator and inputs as the live path — and emits them right after `MESSAGES_SNAPSHOT`, so a client that missed the live stream renders identical cards. A cold read only re-derives cards for Tools that still resolve in the thread's scope, so a crash-materialized frontend Tool call after a restart stays cardless. Cards count against the per-run event budget.
 
 ## Lifecycle
 
