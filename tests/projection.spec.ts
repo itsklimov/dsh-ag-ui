@@ -121,12 +121,12 @@ describe('SessionProjection tool calls', () => {
     expect(projection.lifecycleOf('state-call')).toMatchObject({ kind: 'state', turn: 1, step: 1 })
   })
 
-  it('stays silent for a parked frontend call result', () => {
+  it('stays silent for a parked frontend call result but records its id', () => {
     const projection = new SessionProjection(sessionId)
     projection.project(toolCall('frontend-call', 'ui_action'), 1)
     expect(projection.markParked('frontend-call', backendLifecycle(projection, 'frontend-call'))).toBe(true)
     expect(projection.project(toolResult('frontend-call'), 1).events).toEqual([])
-    expect(projection.consumeServerResult('frontend-call')).toBe(false)
+    expect(projection.consumeServerResult('frontend-call')).toBe(true)
   })
 })
 
@@ -162,6 +162,37 @@ describe('SessionProjection shared state', () => {
     projection.stageCommit('state-failed', { value: { count: 3 }, changed: true })
     expect(projection.project(toolResult('state-failed', true), 1).events).toEqual([])
     expect(projection.sharedState).toEqual({ count: 1 })
+  })
+})
+
+describe('SessionProjection history snapshot', () => {
+  it('derives the full history, skipping injected context, unmapped ids, and empty text', () => {
+    const projection = new SessionProjection(sessionId)
+    const events = [
+      event('user/message', {
+        id: 'sys-1',
+        source: { kind: 'system' },
+        content: [{ type: 'text', text: 'injected context' }],
+      }),
+      event('user/message', {
+        id: 'user-1',
+        source: { kind: 'user' },
+        content: [{ type: 'text', text: 'hello' }],
+      }),
+      event('user/message', {
+        id: 'user-unknown',
+        source: { kind: 'user' },
+        content: [{ type: 'text', text: 'from a cold session' }],
+      }),
+      textMessage(''),
+      textMessage('hello back'),
+      toolResult('call-1'),
+    ]
+    expect(projection.messagesSnapshot(events, id => (id === 'user-1' ? 'client-user-1' : undefined))).toEqual([
+      { id: 'client-user-1', role: 'user', content: 'hello' },
+      { id: messageId, role: 'assistant', content: 'hello back' },
+      { id: 'ag-ui:ag-ui-projection-test:call-1:result', role: 'tool', toolCallId: 'call-1', content: 'result of call-1' },
+    ])
   })
 })
 

@@ -109,6 +109,7 @@ describe('AG-UI Gateway', () => {
 
     expect(events.map(event => event.type)).toEqual([
       EventType.RUN_STARTED,
+      EventType.MESSAGES_SNAPSHOT,
       EventType.STATE_SNAPSHOT,
       EventType.STATE_SNAPSHOT,
       EventType.TEXT_MESSAGE_START,
@@ -186,6 +187,7 @@ describe('AG-UI Gateway', () => {
 
     expect(firstEvents.map(event => event.type)).toEqual([
       EventType.RUN_STARTED,
+      EventType.MESSAGES_SNAPSHOT,
       EventType.TOOL_CALL_START,
       EventType.TOOL_CALL_ARGS,
       EventType.TOOL_CALL_END,
@@ -216,6 +218,7 @@ describe('AG-UI Gateway', () => {
 
     expect(secondEvents.map(event => event.type)).toEqual([
       EventType.RUN_STARTED,
+      EventType.MESSAGES_SNAPSHOT,
       EventType.TEXT_MESSAGE_START,
       EventType.TEXT_MESSAGE_CONTENT,
       EventType.TEXT_MESSAGE_END,

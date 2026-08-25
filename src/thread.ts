@@ -85,6 +85,7 @@ export class ThreadBinding {
   private stagedTools: AgUiTool[] | undefined
   private readonly pendingCalls = new Map<string, PendingFrontendCall>()
   private readonly runLedger = new Map<string, RunRecord>()
+  private readonly userMessageIds = new Map<string, string>()
   private sharedStateActive = false
   private stateToolDispose: (() => void) | undefined
 
@@ -196,6 +197,12 @@ export class ThreadBinding {
   drive(controller: RunController): void {
     if (this.activeRun !== controller) throw new AgUiGatewayError('RUN_NOT_ACTIVE', 'The AG-UI run lost its reservation.', 409)
     controller.start()
+    controller.emit({
+      type: EventType.MESSAGES_SNAPSHOT,
+      messages: this.projection.messagesSnapshot(this.liveAgent.session.events, id => this.userMessageIds.get(id)),
+    })
+    // a snapshot that overflowed the run budget already settled the run
+    if (controller.record.state !== 'active') return
     try {
       const admission = this.classifyMessages(controller.input.messages)
       if (admission.kind === 'user') {
@@ -216,6 +223,7 @@ export class ThreadBinding {
           digest: valueDigest(admission.message),
         })
         controller.messageId = String(message.id)
+        this.userMessageIds.set(String(message.id), admission.message.id)
         this.liveAgent.followup(message)
         return
       }

@@ -502,11 +502,12 @@ describe('ThreadBinding shared state', () => {
     }
     const opening = { type: EventType.RUN_STARTED, threadId: 'thread-1', runId: 'state-update-bytes' }
     const baseline = { type: EventType.STATE_SNAPSHOT, snapshot: { value: 1 } }
-    const byteLimit = [opening, baseline].reduce((total, event) => total + Buffer.byteLength(JSON.stringify(event)), 0)
+    const messagesSnapshot = { type: EventType.MESSAGES_SNAPSHOT, messages: [] }
+    const byteLimit = [opening, messagesSnapshot, baseline].reduce((total, event) => total + Buffer.byteLength(JSON.stringify(event)), 0)
       + Math.max(Buffer.byteLength(JSON.stringify(success)), Buffer.byteLength(JSON.stringify(overflowError)))
 
     for (const [name, overrides] of [
-      ['count', { maxRunEvents: 3 }],
+      ['count', { maxRunEvents: 4 }],
       ['bytes', { maxRunEventBytes: byteLimit }],
     ] as const) {
       const runId = name === 'bytes' ? 'state-update-bytes' : 'state-update-count'

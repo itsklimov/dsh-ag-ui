@@ -131,6 +131,7 @@ describe('AG-UI five-feature conformance', () => {
 
     expect(events.map(event => event.type)).toEqual([
       EventType.RUN_STARTED,
+      EventType.MESSAGES_SNAPSHOT,
       EventType.TEXT_MESSAGE_START,
       EventType.TEXT_MESSAGE_CONTENT,
       EventType.TEXT_MESSAGE_END,
@@ -138,6 +139,35 @@ describe('AG-UI five-feature conformance', () => {
     ])
     await expectLifecycleValid(events)
     expect(agent.messages.at(-1)).toMatchObject({ role: 'assistant', content: 'The consultation draft looks consistent.' })
+  })
+
+  it('the run-start snapshot reflects the full derived history with ids matching the streamed events', async () => {
+    const harness = await mount([
+      toolResponse('conformance-history-call', BACKEND_TOOL.name, { recordId: 'record-7' }),
+      textResponse('Backend lookup completed.'),
+      textResponse('Second answer.'),
+    ])
+    harness.ctx.tools.register(BACKEND_TOOL)
+    const agent = new HttpAgent({ url: harness.url, headers: HEADERS, threadId: 'conformance-history' })
+    agent.addMessage({ id: 'history-user', role: 'user', content: 'Look up record 7.' })
+    const first = await collect(agent, 'history-run-1', [])
+    const second = await collect(agent, 'history-run-2', [])
+
+    const streamedAssistant = first.find(event => event.type === EventType.TEXT_MESSAGE_START)
+    const streamedResult = first.find((event): event is ToolCallResultEvent =>
+      event.type === EventType.TOOL_CALL_RESULT)
+    const snapshot = second.find(event => event.type === EventType.MESSAGES_SNAPSHOT)
+    expect(snapshot?.messages).toEqual([
+      { id: 'history-user', role: 'user', content: 'Look up record 7.' },
+      {
+        id: streamedResult?.messageId,
+        role: 'tool',
+        toolCallId: 'conformance-history-call',
+        content: streamedResult?.content,
+      },
+      { id: streamedAssistant?.messageId, role: 'assistant', content: 'Backend lookup completed.' },
+    ])
+    await expectLifecycleValid(second)
   })
 
   it('backend tool streams a validated call/result pair the client can render', async () => {
@@ -152,6 +182,7 @@ describe('AG-UI five-feature conformance', () => {
 
     expect(events.map(event => event.type)).toEqual([
       EventType.RUN_STARTED,
+      EventType.MESSAGES_SNAPSHOT,
       EventType.TOOL_CALL_START,
       EventType.TOOL_CALL_ARGS,
       EventType.TOOL_CALL_END,
@@ -183,6 +214,7 @@ describe('AG-UI five-feature conformance', () => {
 
     expect(events.map(event => event.type)).toEqual([
       EventType.RUN_STARTED,
+      EventType.MESSAGES_SNAPSHOT,
       EventType.STATE_SNAPSHOT,
       EventType.STATE_SNAPSHOT,
       EventType.TEXT_MESSAGE_START,
@@ -208,6 +240,7 @@ describe('AG-UI five-feature conformance', () => {
 
     expect(parkEvents.map(event => event.type)).toEqual([
       EventType.RUN_STARTED,
+      EventType.MESSAGES_SNAPSHOT,
       EventType.TOOL_CALL_START,
       EventType.TOOL_CALL_ARGS,
       EventType.TOOL_CALL_END,
@@ -225,6 +258,7 @@ describe('AG-UI five-feature conformance', () => {
 
     expect(resumeEvents.map(event => event.type)).toEqual([
       EventType.RUN_STARTED,
+      EventType.MESSAGES_SNAPSHOT,
       EventType.TEXT_MESSAGE_START,
       EventType.TEXT_MESSAGE_CONTENT,
       EventType.TEXT_MESSAGE_END,
@@ -246,6 +280,7 @@ describe('AG-UI five-feature conformance', () => {
 
     expect(events.map(event => event.type)).toEqual([
       EventType.RUN_STARTED,
+      EventType.MESSAGES_SNAPSHOT,
       EventType.TOOL_CALL_START,
       EventType.TOOL_CALL_ARGS,
       EventType.TOOL_CALL_END,

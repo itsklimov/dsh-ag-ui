@@ -1,4 +1,4 @@
-import { EventType, type BaseEvent } from '@ag-ui/core'
+import { EventType, type BaseEvent, type Message as AgUiMessage } from '@ag-ui/core'
 import type { ContentBlock, ToolResultBlock } from '@deepseek-ai/dsh-llm'
 import { type SessionId, type SessionEvent, type TurnEndReason } from '@deepseek-ai/dsh-session'
 
@@ -88,10 +88,7 @@ export class SessionProjection {
       case 'assistant/message': {
         const projection = this.textProjection(event.data.turn, event.data.step)
         if (!projection.started) {
-          const text = event.data.message.content
-            .filter((block): block is Extract<ContentBlock, { type: 'text' }> => block.type === 'text')
-            .map(block => block.text)
-            .join('')
+          const text = joinText(event.data.message.content)
           if (text !== '') {
             projection.started = true
             return {
@@ -141,19 +138,17 @@ export class SessionProjection {
           }
           return EMPTY_STEP
         }
-        if (lifecycle?.kind !== 'frontend') {
-          this.serverResultCallIds.add(callId)
-          return {
-            events: [{
-              type: EventType.TOOL_CALL_RESULT,
-              messageId: `ag-ui:${String(this.sessionId)}:${callId}:result`,
-              toolCallId: callId,
-              content: renderToolResult(block),
-              role: 'tool',
-            }],
-          }
+        this.serverResultCallIds.add(callId)
+        if (lifecycle?.kind === 'frontend') return EMPTY_STEP
+        return {
+          events: [{
+            type: EventType.TOOL_CALL_RESULT,
+            messageId: resultMessageId(this.sessionId, callId),
+            toolCallId: callId,
+            content: renderToolResult(block),
+            role: 'tool',
+          }],
         }
-        return EMPTY_STEP
       }
       case 'turn/end': {
         this.clearTurn(event.data.turn)
@@ -199,6 +194,44 @@ export class SessionProjection {
     }
   }
 
+  /**
+   * Derive the full AG-UI message history from the durable session log, with
+   * ids identical to the streaming projections: user messages keep the ids the
+   * client sent, assistant messages use the step identity, tool results use the
+   * call identity.
+   * @param events - the session's durable event log, in order.
+   * @param userMessageId - durable user message id to the client's AG-UI id; unmapped messages (injected context, foreign sessions) are skipped.
+   */
+  messagesSnapshot(events: readonly SessionEvent[], userMessageId: (durableId: string) => string | undefined): AgUiMessage[] {
+    const messages: AgUiMessage[] = []
+    for (const event of events) {
+      if (event.type === 'user/message') {
+        if (event.data.source.kind !== 'user') continue
+        const id = userMessageId(String(event.data.id))
+        if (id === undefined) continue
+        messages.push({ id, role: 'user', content: joinText(event.data.content) })
+      } else if (event.type === 'assistant/message') {
+        const text = joinText(event.data.message.content)
+        if (text === '') continue
+        messages.push({
+          id: assistantMessageId(this.sessionId, event.data.turn, event.data.step),
+          role: 'assistant',
+          content: text,
+        })
+      } else if (event.type === 'tool/result') {
+        const block = event.data.message.content[0]
+        const callId = String(block.toolCallId)
+        messages.push({
+          id: resultMessageId(this.sessionId, callId),
+          role: 'tool',
+          toolCallId: callId,
+          content: renderToolResult(block),
+        })
+      }
+    }
+    return messages
+  }
+
   private textProjection(turn: number, step: number): TextProjection {
     const key = `${String(turn)}:${String(step)}`
     let projection = this.text.get(key)
@@ -219,6 +252,19 @@ function eventBelongsToTurn(event: SessionEvent, turn: number): boolean {
 /** Deterministic AG-UI assistant message identity for one DSH step. */
 function assistantMessageId(sessionId: SessionId, turn: number, step: number): string {
   return `ag-ui:${String(sessionId)}:${String(turn)}:${String(step)}:assistant`
+}
+
+/** Deterministic AG-UI tool-result message identity for one DSH tool call. */
+function resultMessageId(sessionId: SessionId, callId: string): string {
+  return `ag-ui:${String(sessionId)}:${callId}:result`
+}
+
+/** Concatenate the text blocks of one message's content. */
+function joinText(content: readonly ContentBlock[]): string {
+  return content
+    .filter((block): block is Extract<ContentBlock, { type: 'text' }> => block.type === 'text')
+    .map(block => block.text)
+    .join('')
 }
 
 /** Map one DSH turn-end reason onto the AG-UI run outcome. */
