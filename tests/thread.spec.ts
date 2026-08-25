@@ -628,7 +628,7 @@ describe('ThreadBinding shared state', () => {
 })
 
 describe('ThreadBinding defensive Tool execution', () => {
-  it('rejects missing, mismatched, inactive, and duplicate frontend call positions', async () => {
+  it('rejects missing, mismatched, and inactive frontend call positions', async () => {
     const { binding } = await mount([])
     const state = internals(binding)
     const controller = binding.reserveRun(input('run-private', [{ id: 'message-private', role: 'user', content: 'hello' }]), 'digest-private')
@@ -649,13 +649,44 @@ describe('ThreadBinding defensive Tool execution', () => {
     controller.turn = 2
     expect(() => state.parkFrontendTool(TOOL.name, TOOL.parameters, { value: 'x' }, exec)).toThrow('no active AG-UI run')
     controller.turn = 1
-    void state.parkFrontendTool(TOOL.name, TOOL.parameters, { value: 'x' }, exec).catch(() => {})
-    binding.liveAgent.session.append('tool/call', {
-      turn: 1, step: 1, callId: CallId('duplicate-call'), name: TOOL.name, arguments: '{}',
-    })
-    expect(() => state.parkFrontendTool(TOOL.name, TOOL.parameters, { value: 'x' }, {
-      callId: CallId('duplicate-call'), signal,
-    } as ToolRunContext)).toThrow('Only one frontend Tool call')
+    controller.error('TEST_DONE', 'done')
+  })
+
+  it('holds the park settle until the last announced call of a step parks', async () => {
+    const { binding } = await mount([])
+    const state = internals(binding)
+    state.applyFrontendTools([TOOL])
+    const controller = binding.reserveRun(input('run-multi-park', [{ id: 'message-multi-park', role: 'user', content: 'hello' }]), 'digest-multi-park')
+    controller.turn = 1
+    controller.start()
+    const session = binding.liveAgent.session
+    session.append('turn/start', { turn: 1 })
+    session.append('step/start', { turn: 1, step: 1 })
+    session.append('assistant/message', {
+      turn: 1,
+      step: 1,
+      message: createAssistantMessage({
+        content: [
+          { type: 'tool-call', id: CallId('multi-park-1'), name: TOOL.name, arguments: '{}' },
+          { type: 'tool-call', id: CallId('multi-park-2'), name: TOOL.name, arguments: '{}' },
+        ],
+        source: { provider: 'scripted', model: 'scripted' },
+      }),
+    }, { surfaceOp: 'append' })
+    const signal = new AbortController().signal
+    session.append('tool/call', { turn: 1, step: 1, callId: CallId('multi-park-1'), name: TOOL.name, arguments: '{}' })
+    void state.parkFrontendTool(TOOL.name, TOOL.parameters, { value: 'x' }, {
+      callId: CallId('multi-park-1'), signal,
+    } as ToolRunContext).catch(() => {})
+    expect(controller.record.state).toBe('active')
+
+    session.append('tool/call', { turn: 1, step: 1, callId: CallId('multi-park-2'), name: TOOL.name, arguments: '{}' })
+    void state.parkFrontendTool(TOOL.name, TOOL.parameters, { value: 'x' }, {
+      callId: CallId('multi-park-2'), signal,
+    } as ToolRunContext).catch(() => {})
+    expect(controller.record.state).toBe('completed')
+    expect(controller.record.events.at(-1)).toMatchObject({ type: EventType.RUN_FINISHED })
+    expect(controller.record.events.filter(event => event.type === EventType.TOOL_CALL_END)).toHaveLength(2)
     controller.error('TEST_DONE', 'done')
   })
 

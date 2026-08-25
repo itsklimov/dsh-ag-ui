@@ -36,15 +36,24 @@ export function textResponse(text: string): StreamChunk[] {
 
 /** Create one complete scripted assistant Tool call response. */
 export function toolResponse(callId: string, name: string, args: object): StreamChunk[] {
-  const encoded = JSON.stringify(args)
-  return [
-    { type: 'block-start', index: 0, blockType: 'tool-call' },
-    { type: 'tool-call-delta', index: 0, id: CallId(callId), name, argumentsDelta: encoded },
-    {
-      type: 'block-end',
-      index: 0,
-      block: { type: 'tool-call', id: CallId(callId), name, arguments: encoded },
-    },
-    { type: 'finish', reason: { kind: 'tool-calls' } },
-  ]
+  return toolCallsResponse([{ callId, name, args }])
+}
+
+/** Create one scripted assistant response announcing several Tool calls in one step. */
+export function toolCallsResponse(calls: ReadonlyArray<{ callId: string, name: string, args: object }>): StreamChunk[] {
+  const chunks: StreamChunk[] = []
+  for (const [index, call] of calls.entries()) {
+    const encoded = JSON.stringify(call.args)
+    chunks.push(
+      { type: 'block-start', index, blockType: 'tool-call' },
+      { type: 'tool-call-delta', index, id: CallId(call.callId), name: call.name, argumentsDelta: encoded },
+      {
+        type: 'block-end',
+        index,
+        block: { type: 'tool-call', id: CallId(call.callId), name: call.name, arguments: encoded },
+      },
+    )
+  }
+  chunks.push({ type: 'finish', reason: { kind: 'tool-calls' } })
+  return chunks
 }

@@ -8,7 +8,7 @@ import {
   type UserMessage as AgUiUserMessage,
 } from '@ag-ui/core'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
-import { createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
+import { CallId, createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import {
   assertObjectJsonSchema,
@@ -26,6 +26,13 @@ import { RunController, type RunRecord } from './run.ts'
 import type { AgUiPrincipal, AgUiThreadIdentity } from './types.ts'
 
 const FRONTEND_TOOL_NAME = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/
+
+/** Fixed identity for registry scheduling probes that never dispatch. */
+const SCHEDULING_PROBE = {
+  callId: CallId('ag-ui-scheduling-probe'),
+  arguments: {},
+  signal: new AbortController().signal,
+}
 
 /** Runtime limits and model route resolved from Gateway config. */
 export interface ThreadOptions {
@@ -74,6 +81,9 @@ export class ThreadBinding {
   readonly identity: AgUiThreadIdentity
   /** Pure session-event to wire-event translation owned by this thread. */
   private readonly projection = new SessionProjection(this.sessionId)
+  /** Whether an announced Tool would still start while a parked call holds the pool. */
+  private readonly startsWhileParked = (name: string): boolean =>
+    this.ctx.tools.executionMode({ ...SCHEDULING_PROBE, name, agent: this.liveAgent }).kind === 'parallel'
 
   private handle: AgentHandle | undefined
   private agent: Agent | undefined
@@ -242,9 +252,12 @@ export class ThreadBinding {
           throw new AgUiGatewayError('UNKNOWN_TOOL_RESULT', 'The frontend Tool result has no pending call.', 409)
         }
         this.acceptedMessages.set(message.id, { role: 'tool', digest: valueDigest(message) })
+        this.projection.markAwaitingResult(message.toolCallId)
         if (message.error === undefined) pending.resolve(message.content)
         else pending.reject(new Error(`Frontend Tool failed: ${message.error}`))
       }
+      // a partial resolution leaves calls parked; finish so the client can answer the rest
+      if (this.pendingCalls.size !== 0) controller.success()
     } catch (error) {
       const failure = error instanceof AgUiGatewayError ? error : new AgUiGatewayError('AGENT_EXECUTION_ERROR', 'The AG-UI run could not start.', 500, error)
       controller.error(failure.code, failure.message)
@@ -425,6 +438,7 @@ export class ThreadBinding {
         },
       },
       presentCall: args => ({ card: 'generic', title: 'Update shared state', rawInput: args }),
+      isConcurrencySafe: () => true,
       execute: (args, exec) => Promise.resolve(this.prepareSharedStateUpdate(args, exec)),
     }
     this.stateToolDispose = this.liveAgent.ctx.tools.register(definition)
@@ -511,6 +525,8 @@ export class ThreadBinding {
         },
       },
       presentCall: args => ({ card: 'generic', title: item.tool.description, rawInput: args }),
+      // parking holds no server-side resource, so calls of one step may overlap
+      isConcurrencySafe: () => true,
       execute: (args, exec) => this.parkFrontendTool(item.tool.name, item.schema, args, exec),
     }
   }
@@ -527,8 +543,9 @@ export class ThreadBinding {
     const lifecycle = this.projection.lifecycleOf(callId)
     if (lifecycle?.kind !== 'backend' || lifecycle.name !== name) throw new Error('Frontend Tool call has no DSH call position')
     const active = this.activeRun
-    if (active === undefined || active.turn !== lifecycle.turn) throw new Error('Frontend Tool call has no active AG-UI run')
-    if (!this.projection.markParked(callId, lifecycle)) throw new Error('Only one frontend Tool call is allowed per DSH step')
+    // the run may already have settled once every announced call streamed
+    if (active !== undefined && active.turn !== lifecycle.turn) throw new Error('Frontend Tool call has no active AG-UI run')
+    this.projection.markParked(callId, lifecycle)
 
     const deferred = Promise.withResolvers<string>()
     let settled = false
@@ -557,7 +574,9 @@ export class ThreadBinding {
     }, this.options.frontendToolTimeoutMs)
     exec.signal.addEventListener('abort', onAbort, { once: true })
     this.pendingCalls.set(callId, pending)
-    active.success()
+    this.clearIdleExpiry()
+    if (active !== undefined
+      && this.projection.parkSettleReady(lifecycle.turn, lifecycle.step, this.startsWhileParked)) active.success()
     return deferred.promise
   }
 
@@ -581,6 +600,12 @@ export class ThreadBinding {
       return
     }
     for (const wireEvent of step.events) active.emit(wireEvent)
+    // a server call completing the announced set settles a run parked earlier;
+    // a frontend call settles at its own park instead
+    if (event.type === 'tool/call'
+      && this.projection.parkSettleReady(event.data.turn, event.data.step, this.startsWhileParked)) {
+      active.success()
+    }
   }
 
   private onAgentError(error: unknown): void {

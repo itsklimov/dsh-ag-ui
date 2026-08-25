@@ -5,7 +5,7 @@ import { Context } from '@deepseek-ai/cordis'
 import type { Fiber } from '@deepseek-ai/cordis'
 import WebServer from '@deepseek-ai/dsh-host-webserver'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
-import { ScriptedAdapter, textResponse, toolResponse } from './scripted-adapter.ts'
+import { ScriptedAdapter, textResponse, toolCallsResponse, toolResponse } from './scripted-adapter.ts'
 import { mountTestSpine } from './spine.ts'
 import AgUiGateway from 'dsh-ag-ui'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
@@ -235,6 +235,133 @@ describe('AG-UI Gateway', () => {
     expect(secondRequest?.messages.some(message => message.content.some(block =>
       block.type === 'tool-result' && block.content.some(content =>
         content.type === 'text' && content.text.includes('"version":4'))))).toBe(true)
+  })
+
+  it('parks several frontend Tools in one step and resumes in subset runs', async () => {
+    const harness = await mount([
+      toolCallsResponse([
+        { callId: 'call-draft-a', name: PATCH_TOOL.name, args: { expectedVersion: 3, assessment: 'First assessment.' } },
+        { callId: 'call-draft-b', name: PATCH_TOOL.name, args: { expectedVersion: 3, assessment: 'Second assessment.' } },
+      ]),
+      textResponse('Both drafts applied within one turn.'),
+    ])
+    const agent = new HttpAgent({ url: harness.url, headers: HEADERS, threadId: 'encounter-multi' })
+    agent.addMessage({ id: 'multi-user-1', role: 'user', content: 'Write two assessments.' })
+    const tools = [PATCH_TOOL]
+
+    const firstEvents: BaseEvent[] = []
+    await agent.runAgent({ runId: 'multi-run-1', tools, context: [], forwardedProps: {} }, {
+      onEvent: ({ event }) => { firstEvents.push(event) },
+    })
+    expect(firstEvents.map(event => event.type)).toEqual([
+      EventType.RUN_STARTED,
+      EventType.MESSAGES_SNAPSHOT,
+      EventType.TOOL_CALL_START,
+      EventType.TOOL_CALL_ARGS,
+      EventType.TOOL_CALL_END,
+      EventType.TOOL_CALL_START,
+      EventType.TOOL_CALL_ARGS,
+      EventType.TOOL_CALL_END,
+      EventType.RUN_FINISHED,
+    ])
+    const dshAgent = harness.ctx.agents.list()[0]
+    expect(dshAgent?.status).toBe('running')
+    expect(dshAgent?.session.events.filter(event => event.type === 'tool/call')).toHaveLength(2)
+    expect(dshAgent?.session.events.filter(event => event.type === 'tool/result')).toHaveLength(0)
+
+    agent.addMessage({
+      id: 'multi-result-a',
+      role: 'tool',
+      toolCallId: 'call-draft-a',
+      content: JSON.stringify({ status: 'applied', version: 4 }),
+    })
+    const secondEvents: BaseEvent[] = []
+    await agent.runAgent({ runId: 'multi-run-2', tools, context: [], forwardedProps: {} }, {
+      onEvent: ({ event }) => { secondEvents.push(event) },
+    })
+    expect(secondEvents.map(event => event.type)).toEqual([
+      EventType.RUN_STARTED,
+      EventType.MESSAGES_SNAPSHOT,
+      EventType.RUN_FINISHED,
+    ])
+    expect(dshAgent?.status).toBe('running')
+    expect(dshAgent?.session.events.filter(event => event.type === 'tool/result')).toHaveLength(1)
+
+    agent.addMessage({
+      id: 'multi-result-b',
+      role: 'tool',
+      toolCallId: 'call-draft-b',
+      content: JSON.stringify({ status: 'applied', version: 5 }),
+    })
+    const thirdEvents: BaseEvent[] = []
+    await agent.runAgent({ runId: 'multi-run-3', tools, context: [], forwardedProps: {} }, {
+      onEvent: ({ event }) => { thirdEvents.push(event) },
+    })
+    expect(thirdEvents.map(event => event.type)).toEqual([
+      EventType.RUN_STARTED,
+      EventType.MESSAGES_SNAPSHOT,
+      EventType.TEXT_MESSAGE_START,
+      EventType.TEXT_MESSAGE_CONTENT,
+      EventType.TEXT_MESSAGE_END,
+      EventType.RUN_FINISHED,
+    ])
+    expect(dshAgent?.status).toBe('idle')
+    expect(dshAgent?.session.events.filter(event => event.type === 'turn/start')).toHaveLength(1)
+    expect(dshAgent?.session.events.filter(event => event.type === 'turn/end')).toHaveLength(1)
+    expect(dshAgent?.session.events.filter(event => event.type === 'tool/result')).toHaveLength(2)
+    expect(harness.adapter.requests).toHaveLength(2)
+  })
+
+  it('settles a mixed frontend/backend step once the exclusive backend call cannot start', async () => {
+    const harness = await mount([
+      toolCallsResponse([
+        { callId: 'mixed-frontend', name: PATCH_TOOL.name, args: { expectedVersion: 3, assessment: 'Mixed step.' } },
+        { callId: 'mixed-backend', name: BACKEND_TOOL.name, args: { recordId: 'record-7' } },
+      ]),
+      textResponse('The mixed step completed.'),
+    ])
+    harness.ctx.tools.register(BACKEND_TOOL)
+    const agent = new HttpAgent({ url: harness.url, headers: HEADERS, threadId: 'encounter-mixed' })
+    agent.addMessage({ id: 'mixed-user-1', role: 'user', content: 'Patch and look up.' })
+
+    const firstEvents: BaseEvent[] = []
+    await agent.runAgent({ runId: 'mixed-run-1', tools: [PATCH_TOOL], context: [], forwardedProps: {} }, {
+      onEvent: ({ event }) => { firstEvents.push(event) },
+    })
+    expect(firstEvents.map(event => event.type)).toEqual([
+      EventType.RUN_STARTED,
+      EventType.MESSAGES_SNAPSHOT,
+      EventType.TOOL_CALL_START,
+      EventType.TOOL_CALL_ARGS,
+      EventType.TOOL_CALL_END,
+      EventType.RUN_FINISHED,
+    ])
+
+    agent.addMessage({
+      id: 'mixed-result-frontend',
+      role: 'tool',
+      toolCallId: 'mixed-frontend',
+      content: JSON.stringify({ status: 'applied', version: 4 }),
+    })
+    const secondEvents: BaseEvent[] = []
+    await agent.runAgent({ runId: 'mixed-run-2', tools: [PATCH_TOOL], context: [], forwardedProps: {} }, {
+      onEvent: ({ event }) => { secondEvents.push(event) },
+    })
+    expect(secondEvents.map(event => event.type)).toEqual([
+      EventType.RUN_STARTED,
+      EventType.MESSAGES_SNAPSHOT,
+      EventType.TOOL_CALL_START,
+      EventType.TOOL_CALL_ARGS,
+      EventType.TOOL_CALL_END,
+      EventType.TOOL_CALL_RESULT,
+      EventType.TEXT_MESSAGE_START,
+      EventType.TEXT_MESSAGE_CONTENT,
+      EventType.TEXT_MESSAGE_END,
+      EventType.RUN_FINISHED,
+    ])
+    const dshAgent = harness.ctx.agents.list()[0]
+    expect(dshAgent?.session.events.filter(event => event.type === 'tool/result')).toHaveLength(2)
+    expect(dshAgent?.session.events.filter(event => event.type === 'turn/start')).toHaveLength(1)
   })
 
   it('accepts official-client backend ToolMessage history without echoing frontend results', async () => {

@@ -8,7 +8,7 @@ import WebServer from '@deepseek-ai/dsh-host-webserver'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import AgUiGateway from 'dsh-ag-ui'
-import { ScriptedAdapter, textResponse, toolResponse } from './scripted-adapter.ts'
+import { ScriptedAdapter, textResponse, toolCallsResponse, toolResponse } from './scripted-adapter.ts'
 import { mountTestSpine } from './spine.ts'
 
 /**
@@ -266,6 +266,64 @@ describe('AG-UI five-feature conformance', () => {
     ])
     await expectLifecycleValid(resumeEvents)
     expect(agent.messages.at(-1)).toMatchObject({ role: 'assistant', content: 'Draft updated. Please review it before submitting.' })
+  })
+
+  it('several frontend tools in one step park together and resume in subset runs', async () => {
+    const harness = await mount([
+      toolCallsResponse([
+        { callId: 'conformance-draft-a', name: DRAFT_TOOL.name, args: { expectedVersion: 3, assessment: 'First.' } },
+        { callId: 'conformance-draft-b', name: DRAFT_TOOL.name, args: { expectedVersion: 3, assessment: 'Second.' } },
+      ]),
+      textResponse('Both drafts applied within one validated turn.'),
+    ])
+    const agent = new HttpAgent({ url: harness.url, headers: HEADERS, threadId: 'conformance-hitl-multi' })
+    agent.addMessage({ id: 'hitl-multi-user', role: 'user', content: 'Write two assessments.' })
+    const parkEvents = await collect(agent, 'hitl-multi-run-1', [DRAFT_TOOL])
+
+    expect(parkEvents.map(event => event.type)).toEqual([
+      EventType.RUN_STARTED,
+      EventType.MESSAGES_SNAPSHOT,
+      EventType.TOOL_CALL_START,
+      EventType.TOOL_CALL_ARGS,
+      EventType.TOOL_CALL_END,
+      EventType.TOOL_CALL_START,
+      EventType.TOOL_CALL_ARGS,
+      EventType.TOOL_CALL_END,
+      EventType.RUN_FINISHED,
+    ])
+    await expectLifecycleValid(parkEvents)
+
+    agent.addMessage({
+      id: 'hitl-multi-result-a',
+      role: 'tool',
+      toolCallId: 'conformance-draft-a',
+      content: JSON.stringify({ status: 'applied', version: 4 }),
+    })
+    const subsetEvents = await collect(agent, 'hitl-multi-run-2', [DRAFT_TOOL])
+    expect(subsetEvents.map(event => event.type)).toEqual([
+      EventType.RUN_STARTED,
+      EventType.MESSAGES_SNAPSHOT,
+      EventType.RUN_FINISHED,
+    ])
+    await expectLifecycleValid(subsetEvents)
+
+    agent.addMessage({
+      id: 'hitl-multi-result-b',
+      role: 'tool',
+      toolCallId: 'conformance-draft-b',
+      content: JSON.stringify({ status: 'applied', version: 5 }),
+    })
+    const resumeEvents = await collect(agent, 'hitl-multi-run-3', [DRAFT_TOOL])
+    expect(resumeEvents.map(event => event.type)).toEqual([
+      EventType.RUN_STARTED,
+      EventType.MESSAGES_SNAPSHOT,
+      EventType.TEXT_MESSAGE_START,
+      EventType.TEXT_MESSAGE_CONTENT,
+      EventType.TEXT_MESSAGE_END,
+      EventType.RUN_FINISHED,
+    ])
+    await expectLifecycleValid(resumeEvents)
+    expect(agent.messages.at(-1)).toMatchObject({ role: 'assistant', content: 'Both drafts applied within one validated turn.' })
   })
 
   it('tool-based generative UI returns a structured payload in a validated tool result', async () => {

@@ -21,6 +21,7 @@ export interface PendingStateCommit {
 export type ToolCallLifecycle =
   | ({ readonly kind: 'backend' } & ToolCallPosition)
   | ({ readonly kind: 'frontend'; readonly parked: true } & ToolCallPosition)
+  | ({ readonly kind: 'awaiting' } & ToolCallPosition)
   | ({ readonly kind: 'state'; commit?: PendingStateCommit } & ToolCallPosition)
 
 /** How the active AG-UI run should settle after a translated event. */
@@ -39,6 +40,12 @@ interface TextProjection {
   started: boolean
 }
 
+/** Which calls a step's assistant message announced, and how many streamed. */
+interface StepToolProgress {
+  readonly announced: readonly string[]
+  streamed: number
+}
+
 const EMPTY_STEP: ProjectionStep = { events: [] }
 
 /**
@@ -50,7 +57,7 @@ const EMPTY_STEP: ProjectionStep = { events: [] }
 export class SessionProjection {
   private readonly text = new Map<string, TextProjection>()
   private readonly toolCallLifecycles = new Map<string, ToolCallLifecycle>()
-  private readonly frontendSteps = new Set<string>()
+  private readonly stepProgress = new Map<string, StepToolProgress>()
   private readonly serverResultCallIds = new Set<string>()
 
   /** Shared application state carried between runs; committed by state-tool results. */
@@ -65,7 +72,7 @@ export class SessionProjection {
    */
   project(event: SessionEvent, activeTurn: number | undefined): ProjectionStep {
     if (event.type === 'step/end') {
-      this.frontendSteps.delete(`${String(event.data.turn)}:${String(event.data.step)}`)
+      this.stepProgress.delete(`${String(event.data.turn)}:${String(event.data.step)}`)
       return EMPTY_STEP
     }
     if (activeTurn === undefined || !eventBelongsToTurn(event, activeTurn)) return EMPTY_STEP
@@ -86,6 +93,13 @@ export class SessionProjection {
         return { events: [{ type: EventType.TEXT_MESSAGE_CONTENT, messageId: projection.messageId, delta: event.data.chunk.text }] }
       }
       case 'assistant/message': {
+        const announced = announcedToolNames(event.data.message.content)
+        if (announced.length > 0) {
+          this.stepProgress.set(`${String(event.data.turn)}:${String(event.data.step)}`, {
+            announced,
+            streamed: 0,
+          })
+        }
         const projection = this.textProjection(event.data.turn, event.data.step)
         if (!projection.started) {
           const text = joinText(event.data.message.content)
@@ -105,6 +119,8 @@ export class SessionProjection {
       }
       case 'tool/call': {
         const callId = String(event.data.callId)
+        const progress = this.stepProgress.get(`${String(event.data.turn)}:${String(event.data.step)}`)
+        if (progress !== undefined) progress.streamed += 1
         this.toolCallLifecycles.set(callId, {
           kind: event.data.name === STATE_TOOL_NAME ? 'state' : 'backend',
           turn: event.data.turn,
@@ -139,7 +155,7 @@ export class SessionProjection {
           return EMPTY_STEP
         }
         this.serverResultCallIds.add(callId)
-        if (lifecycle?.kind === 'frontend') return EMPTY_STEP
+        if (lifecycle?.kind === 'frontend' || lifecycle?.kind === 'awaiting') return EMPTY_STEP
         return {
           events: [{
             type: EventType.TOOL_CALL_RESULT,
@@ -164,16 +180,46 @@ export class SessionProjection {
     return this.toolCallLifecycles.get(callId)
   }
 
-  /**
-   * Transition a validated backend call to parked, claiming its step slot.
-   * @returns false when the step already holds a parked frontend call.
-   */
-  markParked(callId: string, lifecycle: ToolCallLifecycle & { kind: 'backend' }): boolean {
-    const stepKey = `${String(lifecycle.turn)}:${String(lifecycle.step)}`
-    if (this.frontendSteps.has(stepKey)) return false
-    this.frontendSteps.add(stepKey)
+  /** Transition one validated backend call of this session to parked. */
+  markParked(callId: string, lifecycle: ToolCallLifecycle & { kind: 'backend' }): void {
     this.toolCallLifecycles.set(callId, { ...lifecycle, kind: 'frontend', parked: true })
-    return true
+  }
+
+  /** Record the client's answer to a parked call; its durable result is pending. */
+  markAwaitingResult(callId: string): void {
+    const lifecycle = this.toolCallLifecycles.get(callId)
+    if (lifecycle?.kind === 'frontend') {
+      this.toolCallLifecycles.set(callId, {
+        kind: 'awaiting',
+        turn: lifecycle.turn,
+        step: lifecycle.step,
+        name: lifecycle.name,
+      })
+    }
+  }
+
+  /**
+   * Whether a run observing this step may finish after a park: a call is
+   * parked, no answered call still awaits its durable result, and no further
+   * announced call would start while the park holds the scheduler pool.
+   * Un-resulted server calls do not block: DSH commits results in model
+   * order, so a call after a parked one cannot commit until the parked call
+   * resolves, and its result reaches the client through a later run instead.
+   * Steps without an announcement settle at the first park.
+   * @param startsWhileParked - whether one announced call would still start.
+   */
+  parkSettleReady(turn: number, step: number, startsWhileParked: (name: string) => boolean): boolean {
+    let parked = false
+    for (const lifecycle of this.toolCallLifecycles.values()) {
+      if (lifecycle.turn !== turn || lifecycle.step !== step) continue
+      if (lifecycle.kind === 'awaiting') return false
+      if (lifecycle.kind === 'frontend') parked = true
+    }
+    if (!parked) return false
+    const progress = this.stepProgress.get(`${String(turn)}:${String(step)}`)
+    if (progress === undefined) return true
+    const next = progress.announced[progress.streamed]
+    return next === undefined || !startsWhileParked(next)
   }
 
   /** Attach a prepared shared-state commit to its live state call. */
@@ -191,6 +237,9 @@ export class SessionProjection {
   clearTurn(turn: number): void {
     for (const [callId, lifecycle] of this.toolCallLifecycles) {
       if (lifecycle.turn === turn) this.toolCallLifecycles.delete(callId)
+    }
+    for (const key of this.stepProgress.keys()) {
+      if (key.startsWith(`${String(turn)}:`)) this.stepProgress.delete(key)
     }
   }
 
@@ -257,6 +306,11 @@ function assistantMessageId(sessionId: SessionId, turn: number, step: number): s
 /** Deterministic AG-UI tool-result message identity for one DSH tool call. */
 function resultMessageId(sessionId: SessionId, callId: string): string {
   return `ag-ui:${String(sessionId)}:${callId}:result`
+}
+
+/** Names of the tool calls one assistant message announced, in model order. */
+function announcedToolNames(content: readonly ContentBlock[]): string[] {
+  return content.filter(block => block.type === 'tool-call').map(block => block.name)
 }
 
 /** Concatenate the text blocks of one message's content. */
