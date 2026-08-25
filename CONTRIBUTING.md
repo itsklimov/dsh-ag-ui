@@ -16,8 +16,10 @@ git clone https://github.com/CaiZongyuan/dsh-ag-ui.git
 cd dsh-ag-ui
 corepack enable
 pnpm install
-pnpm check
+pnpm -r check
 ```
+
+The repository is a pnpm workspace: the root package is the Gateway, and `packages/dsh-ag-ui-cards` holds the React card renderers. `pnpm check` inside a package checks that package; `pnpm -r check` checks every package.
 
 ## Design rules
 
@@ -53,7 +55,7 @@ Document BFF authentication requirements
 ## Releases
 
 - Update `CHANGELOG.md`.
-- Verify `pnpm check` and `pnpm pack --dry-run`.
+- Verify `pnpm -r check` and `pnpm -r pack --dry-run`.
 - Create an annotated `vX.Y.Z` tag.
 - Publish with npm provenance from a protected GitHub release workflow or trusted local environment.
 

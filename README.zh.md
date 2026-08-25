@@ -22,6 +22,7 @@
 - 跨 HTTP runs 的 Frontend Tool Promise park 与 ToolMessage continuation
 - 通过 `RunAgentInput.state`、`ag_ui_update_state` 和 `STATE_SNAPSHOT` 实现的双向 shared state
 - 后端 Tool 调用以带版本的 `dsh:tool:view` CUSTOM 事件携带 presenter card，live 与冷回放一致
+- 独立的 `dsh-ag-ui-cards` React 包渲染全部 card 种类，组件测试基于录制自真实 Gateway 的事件
 - 覆盖五项标准 AG-UI feature 的 keyless Dojo-compatible example
 - Run 和 message 幂等
 - Request、context、Tool schema、event buffer、thread 和 run ledger 上限
@@ -291,6 +292,8 @@ Backend Tool result 会发出 `TOOL_CALL_RESULT`。Frontend Tool result 不在 A
 - 保留 Tool `ag_ui_update_state` 与客户端提供的 frontend Tool 被排除：state Tool 经 `STATE_SNAPSHOT` 投影，客户端本来就了解如何呈现自己的 Tool。
 - 每个 run 开始时，Gateway 会从 durable session log 重新推导整个转录的已结算 card——与 live 路径使用相同的求值器与输入——并在 `MESSAGES_SNAPSHOT` 之后立即发出，因此错过 live 流的客户端也能渲染出完全一致的 card。冷读取只会为仍在该 thread scope 内可解析的 Tool 重新推导 card，因此重启后由崩溃恢复物化的 frontend Tool 调用不会带 card。card 计入 run 的事件预算。
 
+独立的 [`dsh-ag-ui-cards`](packages/dsh-ag-ui-cards) React 包基于这些 envelope 渲染全部 card 种类，不依赖任何 DSH runtime，并给出了事件接线配方。其组件测试渲染录制自本 Gateway 的事件，录制场景由本仓库的测试套件持续守护。
+
 ## 生命周期
 
 所有 effect 都属于 Cordis plugin fiber。Route removal、idle expiry、timeout 和 plugin disposal 会注销 browser Tools、拒绝 pending calls、取消 active work、dispose Agent handles，并等待完全停稳。
@@ -368,10 +371,10 @@ git clone https://github.com/CaiZongyuan/dsh-ag-ui.git
 cd dsh-ag-ui
 corepack enable
 pnpm install
-pnpm check
+pnpm -r check
 ```
 
-`pnpm check` 会运行 lint、strict TypeScript、per-file coverage、runtime/type builds 和 publint。Dojo fixture 仅用于 source checkout，不包含在 npm tarball 中。
+本仓库是 pnpm workspace：根 package 即 Gateway，`packages/dsh-ag-ui-cards` 是 React card 渲染包。`pnpm -r check` 会在每个 package 内运行 lint、strict TypeScript、per-file coverage、runtime/type builds 和 publint。Dojo fixture 仅用于 source checkout，不包含在 npm tarball 中。
 
 贡献和发布要求见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 

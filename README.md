@@ -22,6 +22,7 @@ A community [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 
 - Frontend Tool Promise parking and ToolMessage continuation across HTTP runs
 - Bidirectional shared state through `RunAgentInput.state`, `ag_ui_update_state`, and `STATE_SNAPSHOT`
 - Presenter cards for backend Tool calls as versioned `dsh:tool:view` CUSTOM events, live and on cold replay
+- React renderers for every card kind in the separate `dsh-ag-ui-cards` package, with component tests against recorded gateway events
 - A keyless Dojo-compatible example for five standard AG-UI features
 - Run and message idempotency
 - Bounded requests, context, Tool schemas, event buffers, threads, and run ledgers
@@ -291,6 +292,8 @@ Every backend Tool call carries its DSH render-intent card next to the standard 
 - The reserved `ag_ui_update_state` Tool and client-provided frontend Tools are excluded: the state Tool projects through `STATE_SNAPSHOT`, and the client already knows how to present its own Tools.
 - At each run start, the Gateway re-derives the settled cards of the whole transcript from the durable session log — the same evaluator and inputs as the live path — and emits them right after `MESSAGES_SNAPSHOT`, so a client that missed the live stream renders identical cards. A cold read only re-derives cards for Tools that still resolve in the thread's scope, so a crash-materialized frontend Tool call after a restart stays cardless. Cards count against the per-run event budget.
 
+The separate [`dsh-ag-ui-cards`](packages/dsh-ag-ui-cards) React package renders every card kind from these envelopes with no DSH runtime dependency, and documents the event-wiring recipe. Its component tests render events recorded from this Gateway, and the recording scenario stays guarded by this package's test suite.
+
 ## Lifecycle
 
 All effects belong to the Cordis plugin fiber. Route removal, idle expiry, timeout, and plugin disposal unregister browser Tools, reject pending calls, cancel active work, dispose Agent handles, and wait for quiescence.
@@ -368,10 +371,10 @@ git clone https://github.com/CaiZongyuan/dsh-ag-ui.git
 cd dsh-ag-ui
 corepack enable
 pnpm install
-pnpm check
+pnpm -r check
 ```
 
-`pnpm check` runs lint, strict TypeScript checking, per-file coverage, runtime/type builds, and publint. The Dojo fixture is intentionally source-checkout-only and is not included in the npm tarball.
+The repository is a pnpm workspace: the root package is the Gateway, and `packages/dsh-ag-ui-cards` holds the React card renderers. `pnpm -r check` runs lint, strict TypeScript checking, per-file coverage, runtime/type builds, and publint in every package. The Dojo fixture is intentionally source-checkout-only and is not included in the npm tarball.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution and release requirements.
 

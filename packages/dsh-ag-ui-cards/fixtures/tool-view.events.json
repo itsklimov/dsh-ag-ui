@@ -1,0 +1,831 @@
+{
+  "runs": [
+    [
+      {
+        "type": "RUN_STARTED",
+        "threadId": "cards-fixtures",
+        "runId": "cards-run-1"
+      },
+      {
+        "type": "MESSAGES_SNAPSHOT",
+        "messages": []
+      },
+      {
+        "type": "TOOL_CALL_START",
+        "toolCallId": "cards-call-1",
+        "toolCallName": "notes_check",
+        "parentMessageId": "ag-ui:ag-ui-a8363bf0a4b03cf8b8c250a496625d58d2fa0456:1:1:assistant"
+      },
+      {
+        "type": "TOOL_CALL_ARGS",
+        "toolCallId": "cards-call-1",
+        "delta": "{\"path\":\"notes.md\"}"
+      },
+      {
+        "type": "TOOL_CALL_END",
+        "toolCallId": "cards-call-1"
+      },
+      {
+        "type": "CUSTOM",
+        "name": "dsh:tool:view",
+        "value": {
+          "version": 1,
+          "callId": "cards-call-1",
+          "toolName": "notes_check",
+          "phase": "call",
+          "card": {
+            "card": "generic",
+            "title": "Checking notes.md",
+            "kind": "read",
+            "rawInput": {
+              "path": "notes.md"
+            },
+            "locations": [
+              {
+                "path": "notes.md",
+                "line": 3
+              }
+            ]
+          }
+        }
+      },
+      {
+        "type": "TOOL_CALL_RESULT",
+        "messageId": "ag-ui:ag-ui-a8363bf0a4b03cf8b8c250a496625d58d2fa0456:cards-call-1:result",
+        "toolCallId": "cards-call-1",
+        "content": "3 headings, 12 lines",
+        "role": "tool"
+      },
+      {
+        "type": "CUSTOM",
+        "name": "dsh:tool:view",
+        "value": {
+          "version": 1,
+          "callId": "cards-call-1",
+          "toolName": "notes_check",
+          "phase": "result",
+          "card": {
+            "card": "generic",
+            "title": "Checked notes.md",
+            "content": [
+              {
+                "type": "text",
+                "text": "3 headings in 12 lines"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "type": "TOOL_CALL_START",
+        "toolCallId": "cards-call-2",
+        "toolCallName": "suite_run",
+        "parentMessageId": "ag-ui:ag-ui-a8363bf0a4b03cf8b8c250a496625d58d2fa0456:1:1:assistant"
+      },
+      {
+        "type": "TOOL_CALL_ARGS",
+        "toolCallId": "cards-call-2",
+        "delta": "{\"suite\":\"unit\"}"
+      },
+      {
+        "type": "TOOL_CALL_END",
+        "toolCallId": "cards-call-2"
+      },
+      {
+        "type": "CUSTOM",
+        "name": "dsh:tool:view",
+        "value": {
+          "version": 1,
+          "callId": "cards-call-2",
+          "toolName": "suite_run",
+          "phase": "call",
+          "card": {
+            "card": "terminal",
+            "title": "pnpm test",
+            "description": "Run the unit suite",
+            "cwd": "/repo"
+          }
+        }
+      },
+      {
+        "type": "TOOL_CALL_RESULT",
+        "messageId": "ag-ui:ag-ui-a8363bf0a4b03cf8b8c250a496625d58d2fa0456:cards-call-2:result",
+        "toolCallId": "cards-call-2",
+        "content": "ok — 148 tests passed",
+        "role": "tool"
+      },
+      {
+        "type": "CUSTOM",
+        "name": "dsh:tool:view",
+        "value": {
+          "version": 1,
+          "callId": "cards-call-2",
+          "toolName": "suite_run",
+          "phase": "result",
+          "card": {
+            "card": "terminal",
+            "output": "ok — 148 tests passed",
+            "exitCode": 0
+          }
+        }
+      },
+      {
+        "type": "TOOL_CALL_START",
+        "toolCallId": "cards-call-3",
+        "toolCallName": "greeting_write",
+        "parentMessageId": "ag-ui:ag-ui-a8363bf0a4b03cf8b8c250a496625d58d2fa0456:1:1:assistant"
+      },
+      {
+        "type": "TOOL_CALL_ARGS",
+        "toolCallId": "cards-call-3",
+        "delta": "{\"text\":\"hello dsh\"}"
+      },
+      {
+        "type": "TOOL_CALL_END",
+        "toolCallId": "cards-call-3"
+      },
+      {
+        "type": "CUSTOM",
+        "name": "dsh:tool:view",
+        "value": {
+          "version": 1,
+          "callId": "cards-call-3",
+          "toolName": "greeting_write",
+          "phase": "call",
+          "card": {
+            "card": "diff",
+            "title": "Write greeting.txt",
+            "diffs": [
+              {
+                "path": "greeting.txt",
+                "oldText": null,
+                "newText": "hello\nworld\n"
+              }
+            ],
+            "locations": [
+              {
+                "path": "greeting.txt"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "type": "TOOL_CALL_RESULT",
+        "messageId": "ag-ui:ag-ui-a8363bf0a4b03cf8b8c250a496625d58d2fa0456:cards-call-3:result",
+        "toolCallId": "cards-call-3",
+        "content": "wrote 1 line",
+        "role": "tool"
+      },
+      {
+        "type": "CUSTOM",
+        "name": "dsh:tool:view",
+        "value": {
+          "version": 1,
+          "callId": "cards-call-3",
+          "toolName": "greeting_write",
+          "phase": "result",
+          "card": {
+            "card": "diff",
+            "title": "Wrote greeting.txt",
+            "diffs": [
+              {
+                "path": "greeting.txt",
+                "oldText": "hello\n",
+                "newText": "hello dsh\n"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "type": "TOOL_CALL_START",
+        "toolCallId": "cards-call-4",
+        "toolCallName": "file_read",
+        "parentMessageId": "ag-ui:ag-ui-a8363bf0a4b03cf8b8c250a496625d58d2fa0456:1:1:assistant"
+      },
+      {
+        "type": "TOOL_CALL_ARGS",
+        "toolCallId": "cards-call-4",
+        "delta": "{\"path\":\"src/app.ts\"}"
+      },
+      {
+        "type": "TOOL_CALL_END",
+        "toolCallId": "cards-call-4"
+      },
+      {
+        "type": "CUSTOM",
+        "name": "dsh:tool:view",
+        "value": {
+          "version": 1,
+          "callId": "cards-call-4",
+          "toolName": "file_read",
+          "phase": "call",
+          "card": {
+            "card": "generic",
+            "title": "Reading src/app.ts",
+            "kind": "read",
+            "rawInput": {
+              "path": "src/app.ts"
+            }
+          }
+        }
+      },
+      {
+        "type": "TOOL_CALL_RESULT",
+        "messageId": "ag-ui:ag-ui-a8363bf0a4b03cf8b8c250a496625d58d2fa0456:cards-call-4:result",
+        "toolCallId": "cards-call-4",
+        "content": "{\"path\":\"src/app.ts\",\"offset\":3,\"lines\":[{\"number\":3,\"text\":\"export function start() {\"},{\"number\":4,\"text\":\"  return runtime.boot()\"},{\"number\":5,\"text\":\"}\"}],\"totalLines\":41,\"lang\":\"ts\"}",
+        "role": "tool"
+      },
+      {
+        "type": "CUSTOM",
+        "name": "dsh:tool:view",
+        "value": {
+          "version": 1,
+          "callId": "cards-call-4",
+          "toolName": "file_read",
+          "phase": "result",
+          "card": {
+            "card": "read",
+            "path": "src/app.ts",
+            "offset": 3,
+            "lines": [
+              {
+                "number": 3,
+                "text": "export function start() {"
+              },
+              {
+                "number": 4,
+                "text": "  return runtime.boot()"
+              },
+              {
+                "number": 5,
+                "text": "}"
+              }
+            ],
+            "totalLines": 41,
+            "lang": "ts"
+          }
+        }
+      },
+      {
+        "type": "TOOL_CALL_START",
+        "toolCallId": "cards-call-5",
+        "toolCallName": "text_search",
+        "parentMessageId": "ag-ui:ag-ui-a8363bf0a4b03cf8b8c250a496625d58d2fa0456:1:1:assistant"
+      },
+      {
+        "type": "TOOL_CALL_ARGS",
+        "toolCallId": "cards-call-5",
+        "delta": "{\"query\":\"dsh:tool:view\"}"
+      },
+      {
+        "type": "TOOL_CALL_END",
+        "toolCallId": "cards-call-5"
+      },
+      {
+        "type": "CUSTOM",
+        "name": "dsh:tool:view",
+        "value": {
+          "version": 1,
+          "callId": "cards-call-5",
+          "toolName": "text_search",
+          "phase": "call",
+          "card": {
+            "card": "generic",
+            "title": "Searching \"dsh:tool:view\"",
+            "kind": "search",
+            "rawInput": {
+              "query": "dsh:tool:view"
+            }
+          }
+        }
+      },
+      {
+        "type": "TOOL_CALL_RESULT",
+        "messageId": "ag-ui:ag-ui-a8363bf0a4b03cf8b8c250a496625d58d2fa0456:cards-call-5:result",
+        "toolCallId": "cards-call-5",
+        "content": "9 matches in 1 file",
+        "role": "tool"
+      },
+      {
+        "type": "CUSTOM",
+        "name": "dsh:tool:view",
+        "value": {
+          "version": 1,
+          "callId": "cards-call-5",
+          "toolName": "text_search",
+          "phase": "result",
+          "card": {
+            "card": "search",
+            "shape": "matches",
+            "title": "Found \"dsh:tool:view\"",
+            "files": [
+              {
+                "path": "src/tool-view.ts",
+                "matches": [
+                  {
+                    "lineNumber": 12,
+                    "line": "export const TOOL_VIEW_NAME"
+                  },
+                  {
+                    "lineNumber": 31,
+                    "line": "export function toolViewCallEnvelope"
+                  }
+                ]
+              }
+            ],
+            "truncated": true,
+            "total": 9
+          }
+        }
+      },
+      {
+        "type": "TOOL_CALL_START",
+        "toolCallId": "cards-call-6",
+        "toolCallName": "config_glob",
+        "parentMessageId": "ag-ui:ag-ui-a8363bf0a4b03cf8b8c250a496625d58d2fa0456:1:1:assistant"
+      },
+      {
+        "type": "TOOL_CALL_ARGS",
+        "toolCallId": "cards-call-6",
+        "delta": "{\"pattern\":\"*.config.ts\"}"
+      },
+      {
+        "type": "TOOL_CALL_END",
+        "toolCallId": "cards-call-6"
+      },
+      {
+        "type": "CUSTOM",
+        "name": "dsh:tool:view",
+        "value": {
+          "version": 1,
+          "callId": "cards-call-6",
+          "toolName": "config_glob",
+          "phase": "call",
+          "card": {
+            "card": "generic",
+            "title": "Finding *.config.ts",
+            "kind": "search",
+            "rawInput": {
+              "pattern": "*.config.ts"
+            }
+          }
+        }
+      },
+      {
+        "type": "TOOL_CALL_RESULT",
+        "messageId": "ag-ui:ag-ui-a8363bf0a4b03cf8b8c250a496625d58d2fa0456:cards-call-6:result",
+        "toolCallId": "cards-call-6",
+        "content": "2 paths",
+        "role": "tool"
+      },
+      {
+        "type": "CUSTOM",
+        "name": "dsh:tool:view",
+        "value": {
+          "version": 1,
+          "callId": "cards-call-6",
+          "toolName": "config_glob",
+          "phase": "result",
+          "card": {
+            "card": "search",
+            "shape": "paths",
+            "paths": [
+              "vitest.config.ts",
+              "tsdown.config.ts"
+            ],
+            "truncated": false,
+            "total": 2
+          }
+        }
+      },
+      {
+        "type": "TOOL_CALL_START",
+        "toolCallId": "cards-call-7",
+        "toolCallName": "web_search",
+        "parentMessageId": "ag-ui:ag-ui-a8363bf0a4b03cf8b8c250a496625d58d2fa0456:1:1:assistant"
+      },
+      {
+        "type": "TOOL_CALL_ARGS",
+        "toolCallId": "cards-call-7",
+        "delta": "{\"query\":\"AG-UI protocol\"}"
+      },
+      {
+        "type": "TOOL_CALL_END",
+        "toolCallId": "cards-call-7"
+      },
+      {
+        "type": "CUSTOM",
+        "name": "dsh:tool:view",
+        "value": {
+          "version": 1,
+          "callId": "cards-call-7",
+          "toolName": "web_search",
+          "phase": "call",
+          "card": {
+            "card": "generic",
+            "title": "Searching the web for \"AG-UI protocol\"",
+            "kind": "search",
+            "rawInput": {
+              "query": "AG-UI protocol"
+            }
+          }
+        }
+      },
+      {
+        "type": "TOOL_CALL_RESULT",
+        "messageId": "ag-ui:ag-ui-a8363bf0a4b03cf8b8c250a496625d58d2fa0456:cards-call-7:result",
+        "toolCallId": "cards-call-7",
+        "content": "2 sources",
+        "role": "tool"
+      },
+      {
+        "type": "CUSTOM",
+        "name": "dsh:tool:view",
+        "value": {
+          "version": 1,
+          "callId": "cards-call-7",
+          "toolName": "web_search",
+          "phase": "result",
+          "card": {
+            "card": "web",
+            "kind": "search",
+            "title": "Searched the web",
+            "sources": [
+              {
+                "url": "https://ag-ui.com/",
+                "title": "AG-UI protocol",
+                "snippet": "Agent-user interaction protocol",
+                "publishedAt": "2026-01-15"
+              },
+              {
+                "url": "https://example.com/agui-guide",
+                "snippet": "A short guide"
+              }
+            ],
+            "answer": "AG-UI is a protocol for agent-user interaction.",
+            "truncated": true
+          }
+        }
+      },
+      {
+        "type": "TOOL_CALL_START",
+        "toolCallId": "cards-call-8",
+        "toolCallName": "web_fetch",
+        "parentMessageId": "ag-ui:ag-ui-a8363bf0a4b03cf8b8c250a496625d58d2fa0456:1:1:assistant"
+      },
+      {
+        "type": "TOOL_CALL_ARGS",
+        "toolCallId": "cards-call-8",
+        "delta": "{\"url\":\"https://ag-ui.com/\"}"
+      },
+      {
+        "type": "TOOL_CALL_END",
+        "toolCallId": "cards-call-8"
+      },
+      {
+        "type": "CUSTOM",
+        "name": "dsh:tool:view",
+        "value": {
+          "version": 1,
+          "callId": "cards-call-8",
+          "toolName": "web_fetch",
+          "phase": "call",
+          "card": {
+            "card": "generic",
+            "title": "Fetching https://ag-ui.com/",
+            "kind": "fetch",
+            "rawInput": {
+              "url": "https://ag-ui.com/"
+            }
+          }
+        }
+      },
+      {
+        "type": "TOOL_CALL_RESULT",
+        "messageId": "ag-ui:ag-ui-a8363bf0a4b03cf8b8c250a496625d58d2fa0456:cards-call-8:result",
+        "toolCallId": "cards-call-8",
+        "content": "fetched markdown",
+        "role": "tool"
+      },
+      {
+        "type": "CUSTOM",
+        "name": "dsh:tool:view",
+        "value": {
+          "version": 1,
+          "callId": "cards-call-8",
+          "toolName": "web_fetch",
+          "phase": "result",
+          "card": {
+            "card": "web",
+            "kind": "fetch",
+            "url": "https://ag-ui.com/",
+            "statusCode": 200,
+            "truncated": false
+          }
+        }
+      },
+      {
+        "type": "TEXT_MESSAGE_START",
+        "messageId": "ag-ui:ag-ui-a8363bf0a4b03cf8b8c250a496625d58d2fa0456:1:2:assistant",
+        "role": "assistant"
+      },
+      {
+        "type": "TEXT_MESSAGE_CONTENT",
+        "messageId": "ag-ui:ag-ui-a8363bf0a4b03cf8b8c250a496625d58d2fa0456:1:2:assistant",
+        "delta": "Every card recorded."
+      },
+      {
+        "type": "TEXT_MESSAGE_END",
+        "messageId": "ag-ui:ag-ui-a8363bf0a4b03cf8b8c250a496625d58d2fa0456:1:2:assistant"
+      },
+      {
+        "type": "RUN_FINISHED",
+        "threadId": "cards-fixtures",
+        "runId": "cards-run-1",
+        "outcome": {
+          "type": "success"
+        }
+      }
+    ],
+    [
+      {
+        "type": "RUN_STARTED",
+        "threadId": "cards-fixtures",
+        "runId": "cards-run-2"
+      },
+      {
+        "type": "MESSAGES_SNAPSHOT",
+        "messages": [
+          {
+            "id": "cards-user-1",
+            "role": "user",
+            "content": "Record every card kind."
+          },
+          {
+            "id": "ag-ui:ag-ui-a8363bf0a4b03cf8b8c250a496625d58d2fa0456:cards-call-1:result",
+            "content": "3 headings, 12 lines",
+            "role": "tool",
+            "toolCallId": "cards-call-1"
+          },
+          {
+            "id": "ag-ui:ag-ui-a8363bf0a4b03cf8b8c250a496625d58d2fa0456:cards-call-2:result",
+            "content": "ok — 148 tests passed",
+            "role": "tool",
+            "toolCallId": "cards-call-2"
+          },
+          {
+            "id": "ag-ui:ag-ui-a8363bf0a4b03cf8b8c250a496625d58d2fa0456:cards-call-3:result",
+            "content": "wrote 1 line",
+            "role": "tool",
+            "toolCallId": "cards-call-3"
+          },
+          {
+            "id": "ag-ui:ag-ui-a8363bf0a4b03cf8b8c250a496625d58d2fa0456:cards-call-4:result",
+            "content": "{\"path\":\"src/app.ts\",\"offset\":3,\"lines\":[{\"number\":3,\"text\":\"export function start() {\"},{\"number\":4,\"text\":\"  return runtime.boot()\"},{\"number\":5,\"text\":\"}\"}],\"totalLines\":41,\"lang\":\"ts\"}",
+            "role": "tool",
+            "toolCallId": "cards-call-4"
+          },
+          {
+            "id": "ag-ui:ag-ui-a8363bf0a4b03cf8b8c250a496625d58d2fa0456:cards-call-5:result",
+            "content": "9 matches in 1 file",
+            "role": "tool",
+            "toolCallId": "cards-call-5"
+          },
+          {
+            "id": "ag-ui:ag-ui-a8363bf0a4b03cf8b8c250a496625d58d2fa0456:cards-call-6:result",
+            "content": "2 paths",
+            "role": "tool",
+            "toolCallId": "cards-call-6"
+          },
+          {
+            "id": "ag-ui:ag-ui-a8363bf0a4b03cf8b8c250a496625d58d2fa0456:cards-call-7:result",
+            "content": "2 sources",
+            "role": "tool",
+            "toolCallId": "cards-call-7"
+          },
+          {
+            "id": "ag-ui:ag-ui-a8363bf0a4b03cf8b8c250a496625d58d2fa0456:cards-call-8:result",
+            "content": "fetched markdown",
+            "role": "tool",
+            "toolCallId": "cards-call-8"
+          },
+          {
+            "id": "ag-ui:ag-ui-a8363bf0a4b03cf8b8c250a496625d58d2fa0456:1:2:assistant",
+            "role": "assistant",
+            "content": "Every card recorded."
+          }
+        ]
+      },
+      {
+        "type": "CUSTOM",
+        "name": "dsh:tool:view",
+        "value": {
+          "version": 1,
+          "callId": "cards-call-1",
+          "toolName": "notes_check",
+          "phase": "result",
+          "card": {
+            "card": "generic",
+            "title": "Checked notes.md",
+            "content": [
+              {
+                "type": "text",
+                "text": "3 headings in 12 lines"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "type": "CUSTOM",
+        "name": "dsh:tool:view",
+        "value": {
+          "version": 1,
+          "callId": "cards-call-2",
+          "toolName": "suite_run",
+          "phase": "result",
+          "card": {
+            "card": "terminal",
+            "output": "ok — 148 tests passed",
+            "exitCode": 0
+          }
+        }
+      },
+      {
+        "type": "CUSTOM",
+        "name": "dsh:tool:view",
+        "value": {
+          "version": 1,
+          "callId": "cards-call-3",
+          "toolName": "greeting_write",
+          "phase": "result",
+          "card": {
+            "card": "diff",
+            "title": "Wrote greeting.txt",
+            "diffs": [
+              {
+                "path": "greeting.txt",
+                "oldText": "hello\n",
+                "newText": "hello dsh\n"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "type": "CUSTOM",
+        "name": "dsh:tool:view",
+        "value": {
+          "version": 1,
+          "callId": "cards-call-4",
+          "toolName": "file_read",
+          "phase": "result",
+          "card": {
+            "card": "read",
+            "path": "src/app.ts",
+            "offset": 3,
+            "lines": [
+              {
+                "number": 3,
+                "text": "export function start() {"
+              },
+              {
+                "number": 4,
+                "text": "  return runtime.boot()"
+              },
+              {
+                "number": 5,
+                "text": "}"
+              }
+            ],
+            "totalLines": 41,
+            "lang": "ts"
+          }
+        }
+      },
+      {
+        "type": "CUSTOM",
+        "name": "dsh:tool:view",
+        "value": {
+          "version": 1,
+          "callId": "cards-call-5",
+          "toolName": "text_search",
+          "phase": "result",
+          "card": {
+            "card": "search",
+            "shape": "matches",
+            "title": "Found \"dsh:tool:view\"",
+            "files": [
+              {
+                "path": "src/tool-view.ts",
+                "matches": [
+                  {
+                    "lineNumber": 12,
+                    "line": "export const TOOL_VIEW_NAME"
+                  },
+                  {
+                    "lineNumber": 31,
+                    "line": "export function toolViewCallEnvelope"
+                  }
+                ]
+              }
+            ],
+            "truncated": true,
+            "total": 9
+          }
+        }
+      },
+      {
+        "type": "CUSTOM",
+        "name": "dsh:tool:view",
+        "value": {
+          "version": 1,
+          "callId": "cards-call-6",
+          "toolName": "config_glob",
+          "phase": "result",
+          "card": {
+            "card": "search",
+            "shape": "paths",
+            "paths": [
+              "vitest.config.ts",
+              "tsdown.config.ts"
+            ],
+            "truncated": false,
+            "total": 2
+          }
+        }
+      },
+      {
+        "type": "CUSTOM",
+        "name": "dsh:tool:view",
+        "value": {
+          "version": 1,
+          "callId": "cards-call-7",
+          "toolName": "web_search",
+          "phase": "result",
+          "card": {
+            "card": "web",
+            "kind": "search",
+            "title": "Searched the web",
+            "sources": [
+              {
+                "url": "https://ag-ui.com/",
+                "title": "AG-UI protocol",
+                "snippet": "Agent-user interaction protocol",
+                "publishedAt": "2026-01-15"
+              },
+              {
+                "url": "https://example.com/agui-guide",
+                "snippet": "A short guide"
+              }
+            ],
+            "answer": "AG-UI is a protocol for agent-user interaction.",
+            "truncated": true
+          }
+        }
+      },
+      {
+        "type": "CUSTOM",
+        "name": "dsh:tool:view",
+        "value": {
+          "version": 1,
+          "callId": "cards-call-8",
+          "toolName": "web_fetch",
+          "phase": "result",
+          "card": {
+            "card": "web",
+            "kind": "fetch",
+            "url": "https://ag-ui.com/",
+            "statusCode": 200,
+            "truncated": false
+          }
+        }
+      },
+      {
+        "type": "TEXT_MESSAGE_START",
+        "messageId": "ag-ui:ag-ui-a8363bf0a4b03cf8b8c250a496625d58d2fa0456:2:1:assistant",
+        "role": "assistant"
+      },
+      {
+        "type": "TEXT_MESSAGE_CONTENT",
+        "messageId": "ag-ui:ag-ui-a8363bf0a4b03cf8b8c250a496625d58d2fa0456:2:1:assistant",
+        "delta": "Cold replay recorded."
+      },
+      {
+        "type": "TEXT_MESSAGE_END",
+        "messageId": "ag-ui:ag-ui-a8363bf0a4b03cf8b8c250a496625d58d2fa0456:2:1:assistant"
+      },
+      {
+        "type": "RUN_FINISHED",
+        "threadId": "cards-fixtures",
+        "runId": "cards-run-2",
+        "outcome": {
+          "type": "success"
+        }
+      }
+    ]
+  ]
+}
