@@ -23,6 +23,7 @@
 - 通过 `RunAgentInput.state`、`ag_ui_update_state` 和 `STATE_SNAPSHOT` 实现的双向 shared state
 - 后端 Tool 调用以带版本的 `dsh:tool:view` CUSTOM 事件携带 presenter card，live 与冷回放一致
 - 独立的 `dsh-ag-ui-cards` React 包渲染全部 card 种类，组件测试基于录制自真实 Gateway 的事件
+- 独立的 `dsh-ag-ui-adapter` 嵌入适配包，spawn 环回 DSH 微型 Host 并以 AG-UI `AbstractAgent` 形式提供服务
 - 覆盖五项标准 AG-UI feature 的 keyless Dojo-compatible example
 - Run 和 message 幂等
 - Request、context、Tool schema、event buffer、thread 和 run ledger 上限
@@ -248,6 +249,10 @@ Shared state 是 model/UI collaboration data。它永远不授予 backend author
 
 Package 以 `dsh-ag-ui/dojo-host` 发布 framework-free BFF plugin。Keyless scripted model、launcher 和五项 feature suite 仍是仅供 source checkout 使用的 fixtures。命令、routes、upstream Dojo 兼容方式、real-model 配置与安全限制见 [examples/dojo/README.zh.md](examples/dojo/README.zh.md)。
 
+## 嵌入适配器
+
+独立的 [`dsh-ag-ui-adapter`](packages/dsh-ag-ui-adapter) 包是本部署形态网关的嵌入形态对应物。`DshAgent`（`AbstractAgent` 子类）spawn 一个 DSH 微型 Host 子进程——由 Cordis overlay 组合环回 webserver（临时端口）、本网关（按进程生成的 secret）以及调用方的 agent spine 与 model rows——并通过环回 HTTP 以官方 client 原语实现 `run()`，不新增任何协议翻译代码。用法、plugin row 解析、生命周期与嵌入形态的信任姿态见其 README。
+
 ## HTTP 与 run 语义
 
 - Request 必须为 `POST application/json`，并且符合 AG-UI `RunAgentInput`。
@@ -374,7 +379,7 @@ pnpm install
 pnpm -r check
 ```
 
-本仓库是 pnpm workspace：根 package 即 Gateway，`packages/dsh-ag-ui-cards` 是 React card 渲染包。`pnpm -r check` 会在每个 package 内运行 lint、strict TypeScript、per-file coverage、runtime/type builds 和 publint。Dojo fixture 仅用于 source checkout，不包含在 npm tarball 中。
+本仓库是 pnpm workspace：根 package 即 Gateway，`packages/` 下是 `dsh-ag-ui-cards` React card 渲染包与 `dsh-ag-ui-adapter` 嵌入适配包。`pnpm -r check` 会在每个 package 内运行 lint、strict TypeScript、per-file coverage、runtime/type builds 和 publint。Dojo fixture 仅用于 source checkout，不包含在 npm tarball 中。
 
 贡献和发布要求见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 

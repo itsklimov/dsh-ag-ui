@@ -23,6 +23,7 @@ A community [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 
 - Bidirectional shared state through `RunAgentInput.state`, `ag_ui_update_state`, and `STATE_SNAPSHOT`
 - Presenter cards for backend Tool calls as versioned `dsh:tool:view` CUSTOM events, live and on cold replay
 - React renderers for every card kind in the separate `dsh-ag-ui-cards` package, with component tests against recorded gateway events
+- An embedding adapter in the separate `dsh-ag-ui-adapter` package that spawns a loopback DSH micro-host and serves it as an AG-UI `AbstractAgent`
 - A keyless Dojo-compatible example for five standard AG-UI features
 - Run and message idempotency
 - Bounded requests, context, Tool schemas, event buffers, threads, and run ledgers
@@ -248,6 +249,10 @@ Shared state is model/UI collaboration data. It never grants backend authority a
 
 The package ships the framework-free BFF plugin as `dsh-ag-ui/dojo-host`. The keyless scripted model, launcher, and five-feature suite remain source-checkout fixtures. See [examples/dojo/README.md](examples/dojo/README.md) for commands, routes, upstream Dojo compatibility, real-model configuration, and security limitations.
 
+## Embedded adapter
+
+The separate [`dsh-ag-ui-adapter`](packages/dsh-ag-ui-adapter) package is the embedded counterpart of this deployment-form Gateway. A `DshAgent` (`AbstractAgent` subclass) spawns a DSH micro-host child — a Cordis overlay composing the loopback webserver on an ephemeral port, this Gateway with a per-process generated secret, and the caller's agent-spine and model rows — and passes `run()` through loopback HTTP using the official client primitives, adding no protocol translation code. See its README for usage, plugin row resolution, lifecycle, and the trust posture of the embedded shape.
+
 ## HTTP and run semantics
 
 - Requests must be `POST application/json` and match AG-UI `RunAgentInput`.
@@ -374,7 +379,7 @@ pnpm install
 pnpm -r check
 ```
 
-The repository is a pnpm workspace: the root package is the Gateway, and `packages/dsh-ag-ui-cards` holds the React card renderers. `pnpm -r check` runs lint, strict TypeScript checking, per-file coverage, runtime/type builds, and publint in every package. The Dojo fixture is intentionally source-checkout-only and is not included in the npm tarball.
+The repository is a pnpm workspace: the root package is the Gateway, and `packages/` holds the `dsh-ag-ui-cards` React card renderers and the `dsh-ag-ui-adapter` embedding adapter. `pnpm -r check` runs lint, strict TypeScript checking, per-file coverage, runtime/type builds, and publint in every package. The Dojo fixture is intentionally source-checkout-only and is not included in the npm tarball.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution and release requirements.
 

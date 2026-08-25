@@ -19,7 +19,7 @@ pnpm install
 pnpm -r check
 ```
 
-The repository is a pnpm workspace: the root package is the Gateway, and `packages/dsh-ag-ui-cards` holds the React card renderers. `pnpm check` inside a package checks that package; `pnpm -r check` checks every package.
+The repository is a pnpm workspace: the root package is the Gateway, and `packages/` holds the `dsh-ag-ui-cards` React card renderers and the `dsh-ag-ui-adapter` embedding adapter. `pnpm check` inside a package checks that package; `pnpm -r check` checks every package.
 
 ## Design rules
 
