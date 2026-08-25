@@ -14,6 +14,7 @@ import type {} from '@deepseek-ai/dsh-tools'
 import { AgUiGatewayError, publicError } from './errors.ts'
 import { jsonBytes, jsonDepth, requestDigest, utf8Bytes } from './json.ts'
 import { replayRun } from './run.ts'
+import { durableSessionId } from './session-id.ts'
 import { ThreadBinding, type ThreadOptions } from './thread.ts'
 import type { AgUiAgentLookup, AgUiPrincipal, AgUiThreadIdentity } from './types.ts'
 
@@ -233,7 +234,7 @@ export class AgUiGateway extends Service implements AgUiAgentLookup {
       maxRunsPerThread: this.resolved.maxRunsPerThread,
       maxStateBytes: this.resolved.maxStateBytes,
     }
-    const binding = new ThreadBinding(this.ctx, principal, threadId, options, (expired) => {
+    const binding = new ThreadBinding(this.ctx, principal, threadId, durableSessionId(principal, threadId, this.resolved.sharedSecret), options, (expired) => {
       /* v8 ignore next -- one binding instance owns its idle timer; stale callbacks are contained defensively. */
       if (this.bindings.get(key) !== expired) return
       this.bindings.delete(key)

@@ -5,7 +5,7 @@ import { CallId, createAssistantMessage, createToolResultMessage, type StreamChu
 import { ScriptedAdapter, textResponse, toolResponse as scriptedToolResponse } from './scripted-adapter.ts'
 import { mountTestSpine } from './spine.ts'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { ThreadBinding, type ThreadOptions } from '../src/thread.ts'
 
 const contexts: Context[] = []
@@ -52,6 +52,7 @@ async function mount(script: StreamChunk[][] = [textResponse('ok')], overrides: 
     ctx,
     { tenantId: 'tenant-1', userId: 'user-1' },
     'thread-1',
+    SessionId('ag-ui-thread-spec-session'),
     { ...OPTIONS, ...overrides },
     () => { expired++ },
   )
@@ -89,6 +90,7 @@ interface ThreadBindingInternals {
   runLedger: Map<string, { digest: string; events: []; state: 'active' | 'completed'; bytes: number }>
   projection: { sharedState: unknown }
   sharedStateActive: boolean
+  interrupted: boolean
   applyFrontendTools(tools: Tool[]): void
   continuationTurn(messages: Extract<RunAgentInput['messages'][number], { role: 'tool' }>[]): number
   parkFrontendTool(name: string, schema: Tool['parameters'], args: unknown, exec: ToolRunContext): Promise<string>
@@ -235,6 +237,35 @@ describe('ThreadBinding run admission', () => {
     expect(binding.getRun('run-1')).toBeUndefined()
     expect(binding.getRun('run-2')).toBe(second.record)
     await settle(second)
+  })
+
+  it('persists the client message id as the durable user-message id', async () => {
+    const { binding } = await mount([textResponse('ok')])
+    const controller = binding.reserveRun(input('run-derived', [{ id: 'message-derived', role: 'user', content: 'hello' }]), 'digest-derived')
+    binding.drive(controller)
+    await controller.done
+    const logged = binding.liveAgent.session.events
+      .find(item => item.type === 'user/message' && item.data.source.kind === 'user')
+    expect(logged?.data.id).toBe('ag-ui:user:message-derived')
+  })
+
+  it('reports an interrupted thread once, after its history snapshot', async () => {
+    const { binding } = await mount([textResponse('after restart')])
+    internals(binding).interrupted = true
+    const first = binding.reserveRun(input('run-restart-1', [{ id: 'message-restart-1', role: 'user', content: 'hello' }]), 'digest-restart-1')
+    binding.drive(first)
+    await first.done
+    expect(first.record.events.map(item => item.type)).toEqual([
+      EventType.RUN_STARTED,
+      EventType.MESSAGES_SNAPSHOT,
+      EventType.RUN_ERROR,
+    ])
+    expect(first.record.events.at(-1)).toMatchObject({ code: 'THREAD_INTERRUPTED' })
+    expect(internals(binding).interrupted).toBe(false)
+    const second = binding.reserveRun(input('run-restart-2', [{ id: 'message-restart-2', role: 'user', content: 'hello again' }]), 'digest-restart-2')
+    binding.drive(second)
+    await second.done
+    expect(second.record.events.at(-1)).toMatchObject({ type: EventType.RUN_FINISHED })
   })
 })
 

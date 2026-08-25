@@ -5,6 +5,27 @@ import { type SessionId, type SessionEvent, type TurnEndReason } from '@deepseek
 /** Reserved model-facing Tool that shallow-merges shared application state. */
 export const STATE_TOOL_NAME = 'ag_ui_update_state'
 
+/** Prefix marking durable user-message ids derived from client AG-UI ids. */
+const USER_ID_PREFIX = 'ag-ui:user:'
+
+/** Durable user-message identity derived from the client's AG-UI message id. */
+export function durableUserId(clientId: string): string {
+  return `${USER_ID_PREFIX}${clientId}`
+}
+
+/** Whether one durable user-message id carries a derived client identity. */
+function clientUserId(durableId: string): string | undefined {
+  return durableId.startsWith(USER_ID_PREFIX) ? durableId.slice(USER_ID_PREFIX.length) : undefined
+}
+
+/** Facts rebuilt from one durable log at cold resume. */
+export interface ColdRecovery {
+  /** The log's last turn ended interrupted by crash recovery. */
+  readonly interrupted: boolean
+  /** Recovered user messages, as (client id, text content) pairs in log order. */
+  readonly users: ReadonlyArray<{ readonly clientId: string; readonly content: string }>
+}
+
 /** Where a tool call sits inside its DSH session. */
 export interface ToolCallPosition {
   readonly turn: number
@@ -231,6 +252,30 @@ export class SessionProjection {
   /** Consume one recorded backend result id so a re-sent ToolMessage is accepted. */
   consumeServerResult(callId: string): boolean {
     return this.serverResultCallIds.delete(callId)
+  }
+
+  /**
+   * Rebuild resume bookkeeping from one recovered durable log: recorded server
+   * results accept re-sent ToolMessages again, derived user ids recover the
+   * durable-to-client mapping, and an interrupted turn tail marks the thread.
+   * @param events - the session's recovered event log, in order.
+   * @returns cold-resume facts for the owning thread binding.
+   */
+  recoverFrom(events: readonly SessionEvent[]): ColdRecovery {
+    let interrupted = false
+    const users: Array<{ clientId: string, content: string }> = []
+    for (const event of events) {
+      if (event.type === 'user/message') {
+        if (event.data.source.kind !== 'user') continue
+        const clientId = clientUserId(String(event.data.id))
+        if (clientId !== undefined) users.push({ clientId, content: joinText(event.data.content) })
+      } else if (event.type === 'tool/result') {
+        this.serverResultCallIds.add(String(event.data.message.content[0].toolCallId))
+      } else if (event.type === 'turn/end') {
+        interrupted = event.data.reason.kind === 'interrupted'
+      }
+    }
+    return { interrupted, users }
   }
 
   /** Drop call bookkeeping for one finished turn. */

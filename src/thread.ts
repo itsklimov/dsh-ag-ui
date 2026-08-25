@@ -8,7 +8,7 @@ import {
   type UserMessage as AgUiUserMessage,
 } from '@ag-ui/core'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
-import { CallId, createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
+import { CallId, createUserMessage, errorChain, freezeMessage, MessageId } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import {
   assertObjectJsonSchema,
@@ -17,11 +17,10 @@ import {
   type ToolDefinition,
   type ToolRunContext,
 } from '@deepseek-ai/dsh-tools'
-import { randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import { AgUiGatewayError } from './errors.ts'
 import { jsonBytes, valueDigest } from './json.ts'
-import { SessionProjection, STATE_TOOL_NAME } from './projection.ts'
+import { durableUserId, SessionProjection, STATE_TOOL_NAME } from './projection.ts'
 import { RunController, type RunRecord } from './run.ts'
 import type { AgUiPrincipal, AgUiThreadIdentity } from './types.ts'
 
@@ -75,12 +74,12 @@ interface SharedStateBaseline {
 
 /** One authenticated process-local AG-UI thread and its owned DSH Agent. */
 export class ThreadBinding {
-  /** Random DSH Agent and Session identity, never derived from a client thread id. */
-  readonly sessionId = SessionId(`ag-ui-${randomUUID()}`)
+  /** Deterministic durable DSH session identity, derived from the authenticated thread tuple. */
+  readonly sessionId: SessionId
   /** Authenticated principal and client thread tuple owning this binding. */
   readonly identity: AgUiThreadIdentity
   /** Pure session-event to wire-event translation owned by this thread. */
-  private readonly projection = new SessionProjection(this.sessionId)
+  private readonly projection: SessionProjection
   /** Whether an announced Tool would still start while a parked call holds the pool. */
   private readonly startsWhileParked = (name: string): boolean =>
     this.ctx.tools.executionMode({ ...SCHEDULING_PROBE, name, agent: this.liveAgent }).kind === 'parallel'
@@ -88,6 +87,7 @@ export class ThreadBinding {
   private handle: AgentHandle | undefined
   private agent: Agent | undefined
   private disposed = false
+  private interrupted = false
   private activeRun: RunController | undefined
   private idleTimer: ReturnType<typeof setTimeout> | undefined
   private readonly acceptedMessages = new Map<string, AcceptedMessage>()
@@ -103,40 +103,69 @@ export class ThreadBinding {
     private readonly ctx: Context,
     principal: AgUiPrincipal,
     threadId: string,
+    sessionId: SessionId,
     private readonly options: ThreadOptions,
     private readonly onExpired: (binding: ThreadBinding) => void,
   ) {
     this.identity = { principal, threadId }
+    this.sessionId = sessionId
+    this.projection = new SessionProjection(sessionId)
   }
 
-  /** Create the Agent and install scoped listeners before publication. */
+  /** Create the Agent — resuming a persisted session when the host configured one — and install scoped listeners before publication. */
   async initialize(): Promise<void> {
-    const handle = await this.ctx.agents.create({
-      sessionId: this.sessionId,
-      agentOptions: { provider: this.options.provider, model: this.options.model },
-      setup: (agentCtx) => {
-        const agent = agentCtx.agent
-        /* v8 ignore next -- AgentRegistry setup always carries its unpublished Agent association. */
-        if (agent === undefined) throw new Error('ag-ui: unpublished Agent context has no Agent association')
-        this.agent = agent
-        agentCtx.on('session/event', (session, event) => {
-          /* v8 ignore next -- the Agent-scoped listener receives only its exact owned Session. */
-          if (session === agent.session) this.onSessionEvent(event)
-        })
-        agentCtx.on('agent/inbox/claimed', ({ agent: subject, message, turn }) => {
-          const active = this.activeRun
-          if (subject === agent && active?.messageId === String(message.id)) active.turn = turn
-        })
-        agentCtx.on('agent/error', ({ agent: subject, error }) => {
-          /* v8 ignore next -- scope-filtered Agent errors carry this exact Agent. */
-          if (subject === agent) this.onAgentError(error)
-        })
-        agentCtx.on('tools/change', () => { this.checkGlobalCollisions() })
-      },
-    })
+    const handle = await this.restoreOrCreate()
     this.handle = handle
     this.agent = handle.agent
     this.scheduleIdleExpiry()
+  }
+
+  private async restoreOrCreate(): Promise<AgentHandle> {
+    const agentOptions = { provider: this.options.provider, model: this.options.model }
+    const create = () => this.ctx.agents.create({ sessionId: this.sessionId, agentOptions, setup: this.agentSetup() })
+    const persistence = sessionPersistenceOf(this.ctx)
+    if (persistence === undefined) return create()
+    try {
+      const handle = await this.ctx.agents.resume({ resumeSessionId: this.sessionId, agentOptions, setup: this.agentSetup() })
+      this.recover(handle.agent.session.events)
+      return handle
+    } catch (error) {
+      // only a genuinely absent artifact falls back to first creation; a present one keeps its failure loud
+      if ((await persistence.list()).some(header => header.id === this.sessionId)) throw error
+      return create()
+    }
+  }
+
+  private agentSetup(): (agentCtx: Context) => void {
+    return (agentCtx) => {
+      const agent = agentCtx.agent
+      /* v8 ignore next -- AgentRegistry setup always carries its unpublished Agent association. */
+      if (agent === undefined) throw new Error('ag-ui: unpublished Agent context has no Agent association')
+      this.agent = agent
+      agentCtx.on('session/event', (session, event) => {
+        /* v8 ignore next -- the Agent-scoped listener receives only its exact owned Session. */
+        if (session === agent.session) this.onSessionEvent(event)
+      })
+      agentCtx.on('agent/inbox/claimed', ({ agent: subject, message, turn }) => {
+        const active = this.activeRun
+        if (subject === agent && active?.messageId === String(message.id)) active.turn = turn
+      })
+      agentCtx.on('agent/error', ({ agent: subject, error }) => {
+        /* v8 ignore next -- scope-filtered Agent errors carry this exact Agent. */
+        if (subject === agent) this.onAgentError(error)
+      })
+      agentCtx.on('tools/change', () => { this.checkGlobalCollisions() })
+    }
+  }
+
+  /** Rebuild idempotency bookkeeping from one recovered durable log. */
+  private recover(events: readonly SessionEvent[]): void {
+    const recovery = this.projection.recoverFrom(events)
+    for (const user of recovery.users) {
+      this.userMessageIds.set(durableUserId(user.clientId), user.clientId)
+      this.acceptedMessages.set(user.clientId, { role: 'user', digest: messageDigest(user.clientId, user.content) })
+    }
+    this.interrupted = recovery.interrupted
   }
 
   /** The live Agent after successful initialization. */
@@ -213,6 +242,12 @@ export class ThreadBinding {
     })
     // a snapshot that overflowed the run budget already settled the run
     if (controller.record.state !== 'active') return
+    // a restarted thread reports its interrupted turn once so the client can drop parked calls
+    if (this.interrupted) {
+      this.interrupted = false
+      controller.error('THREAD_INTERRUPTED', 'The AG-UI thread was interrupted by a restart; its pending frontend Tool calls are closed.')
+      return
+    }
     try {
       const admission = this.classifyMessages(controller.input.messages)
       if (admission.kind === 'user') {
@@ -224,13 +259,16 @@ export class ThreadBinding {
         this.applyFrontendTools(controller.input.tools)
         this.injectContext(controller.input, baseline)
         this.commitSharedStateBaseline(baseline)
-        const message = createUserMessage({
+        // the client's message id is preserved as the durable id, so a cold resume recovers the mapping
+        const message = freezeMessage({
+          id: MessageId(durableUserId(admission.message.id)),
+          role: 'user',
           content: [{ type: 'text', text: admission.message.content }],
           source: { kind: 'user' },
         })
         this.acceptedMessages.set(admission.message.id, {
           role: 'user',
-          digest: valueDigest(admission.message),
+          digest: messageDigest(admission.message.id, admission.message.content),
         })
         controller.messageId = String(message.id)
         this.userMessageIds.set(String(message.id), admission.message.id)
@@ -661,6 +699,21 @@ export class ThreadBinding {
 function isEmptyStateContainer(value: unknown): boolean {
   if (Array.isArray(value)) return value.length === 0
   return isUnknownRecord(value) && Object.keys(value).length === 0
+}
+
+/** Digest one accepted user message in a fixed field order, stable across cold resume. */
+function messageDigest(clientId: string, content: string): string {
+  return valueDigest({ id: clientId, role: 'user', content })
+}
+
+/** Optional durable persistence service, when the host configured a backend. */
+interface SessionPersistenceLike {
+  list(signal?: AbortSignal): Promise<ReadonlyArray<{ readonly id: SessionId }>>
+}
+
+/** Resolve the host's session persistence backend without requiring one. */
+function sessionPersistenceOf(ctx: Context): SessionPersistenceLike | undefined {
+  return (ctx as Context & { get(name: string): unknown }).get('sessionPersistence') as SessionPersistenceLike | undefined
 }
 
 /** Narrow a JSON object without accepting arrays or null. */

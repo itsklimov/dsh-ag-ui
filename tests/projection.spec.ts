@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { EventType } from '@ag-ui/core'
 import { CallId, createAssistantMessage, createToolResultMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
-import { SessionProjection, STATE_TOOL_NAME, type ToolCallLifecycle } from '../src/projection.ts'
+import { durableUserId, SessionProjection, STATE_TOOL_NAME, type ToolCallLifecycle } from '../src/projection.ts'
 
 function backendLifecycle(projection: SessionProjection, callId: string): ToolCallLifecycle & { kind: 'backend' } {
   const lifecycle = projection.lifecycleOf(callId)
@@ -60,6 +60,14 @@ function toolResult(callId: string, isError = false): SessionEvent {
       isError,
       content: [{ type: 'text', text: `result of ${callId}` }],
     }),
+  })
+}
+
+function userMessage(durableId: string, text: string, kind = 'user'): SessionEvent {
+  return event('user/message', {
+    id: durableId,
+    source: { kind },
+    content: [{ type: 'text', text }],
   })
 }
 
@@ -315,5 +323,47 @@ describe('SessionProjection run outcomes', () => {
     projection.clearTurn(1)
     expect(projection.lifecycleOf('turn-1-call')).toBeUndefined()
     expect(projection.lifecycleOf('turn-2-call')).toMatchObject({ kind: 'backend', turn: 2 })
+  })
+})
+
+describe('SessionProjection cold recovery', () => {
+  it('recovers derived users and recorded server results from a durable log', () => {
+    const projection = new SessionProjection(sessionId)
+    const recovery = projection.recoverFrom([
+      userMessage('sys-1', 'injected context', 'system'),
+      userMessage(durableUserId('client-user-1'), 'hello'),
+      userMessage('foreign-uuid', 'written by another owner'),
+      toolResult('call-1'),
+      userMessage(durableUserId('client-user-2'), 'again'),
+    ])
+    expect(recovery.users).toEqual([
+      { clientId: 'client-user-1', content: 'hello' },
+      { clientId: 'client-user-2', content: 'again' },
+    ])
+    expect(recovery.interrupted).toBe(false)
+    expect(projection.consumeServerResult('call-1')).toBe(true)
+    expect(projection.consumeServerResult('call-1')).toBe(false)
+  })
+
+  it('marks the thread interrupted only when the last turn ended interrupted', () => {
+    const turnEnd = (turn: number, kind: string): SessionEvent =>
+      event('turn/end', { turn, reason: { kind } })
+    const interrupted = new SessionProjection(sessionId).recoverFrom([
+      turnEnd(1, 'interrupted'),
+    ])
+    expect(interrupted.interrupted).toBe(true)
+
+    const recovered = new SessionProjection(sessionId).recoverFrom([
+      turnEnd(1, 'interrupted'),
+      turnEnd(2, 'completed'),
+    ])
+    expect(recovered.interrupted).toBe(false)
+
+    const stale = new SessionProjection(sessionId).recoverFrom([
+      turnEnd(1, 'interrupted'),
+      turnEnd(2, 'completed'),
+      turnEnd(3, 'interrupted'),
+    ])
+    expect(stale.interrupted).toBe(true)
   })
 })
