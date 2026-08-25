@@ -6,7 +6,7 @@
 [![npm version](https://img.shields.io/npm/v/dsh-ag-ui.svg)](https://www.npmjs.com/package/dsh-ag-ui)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-一个社区维护的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Host 插件，通过 [AG-UI protocol](https://github.com/ag-ui-protocol/ag-ui) 暴露 DSH Agent。它提供经过认证的 HTTP/SSE Gateway、AG-UI thread 到 DSH Agent 的绑定、流式文本和 Tool event、浏览器持有的 Tools，以及浏览器返回 Tool result 后继续同一个 DSH turn 的能力。
+一个社区维护的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Host 插件，通过 [AG-UI protocol](https://github.com/ag-ui-protocol/ag-ui) 暴露 DSH Agent。它提供经过认证的 HTTP/SSE Gateway、AG-UI thread 到 DSH Agent 的绑定、流式文本和 Tool event、浏览器持有的 Tools，以及浏览器返回 Tool result 后继续同一个 DSH turn 的能力。同一套投影核心另有一种嵌入形态：独立的 `dsh-ag-ui-adapter` 包在 AG-UI `AbstractAgent` 背后 spawn 一个私有的环回微型 Host。
 
 > 这是社区项目，不是 DeepSeek 或 AG-UI 官方 package。
 
@@ -120,18 +120,34 @@ Bundle 插入一个 Host-plane `ag-ui` row 来加载 Gateway service。Package �
 
 ## 架构
 
+一套投影核心，两种支持的形态。核心是 `dsh-ag-ui` Host service：它把 AG-UI thread 绑定到 DSH Agent，并在两个方向上翻译 run、event、Tool、shared state 与 presenter card。其余一切只是包装。
+
 ```text
-Browser
-  -> authenticated application BFF
-  -> POST /ag-ui，携带 bearer secret 与可信 identity headers
-  -> dsh-ag-ui Host Service
-  -> DSH Agent / Session / Tool runtime
-  -> model provider 与 backend Tools
+部署形态 — BFF Gateway                     嵌入形态 — dsh-ag-ui-adapter
+
+Browser                                    Node.js 应用
+  -> 经过认证的应用 BFF                      -> DshAgent（AG-UI AbstractAgent）
+       bearer secret 与可信                       spawn 一个私有微型 Host 子进程：
+       identity headers                           - 环回 webserver，临时端口
+  -> POST /ag-ui 到 Host                         - 同一个已发布的 dsh-ag-ui
+  -> dsh-ag-ui Host Service                        gateway row，按进程 secret
+  -> DSH Agent / Session / Tool runtime          - 应用自己的 spine 与
+  -> model provider 与 backend Tools                model plugin rows
+                                            -> run() 经环回 HTTP 访问同一个
+                                               gateway service
 ```
 
-Gateway binding key 是精确的 `(tenantId, userId, threadId)` tuple。浏览器提供的 identity、permission、patient ID、resource ID、`context` 或 `forwardedProps` 永远不能授予 backend authority。
+部署形态用经过认证的 BFF 为浏览器客户端挡在共享 Host 之前。嵌入形态（[`dsh-ag-ui-adapter`](packages/dsh-ag-ui-adapter)）为每个应用进程组合一个一次性的 Host——首次 run 之前不 spawn 任何东西，子进程也绝不会比宿主进程活得更久。两种形态以同一协议访问同一投影核心，因此 run 语义、browser Tools、shared state、presenter card、幂等与 disposal 行为完全一致。
 
-Backend Tool 可以从 Agent 推导经过认证的 thread identity：
+两种形态下，gateway binding key 都是由可信 identity headers 提供的精确 `(tenantId, userId, threadId)` tuple。
+
+## 信任姿态
+
+- Gateway 监听在 Host webserver 上。让该 webserver 保持 loopback 并放在同 Host 的经过认证的 BFF 之后；非 loopback bind 需要显式设置 `allowNonLoopback`，而这几乎总是错误的。
+- Bearer secret 认证的是**一跳 service-to-service 通信**——BFF（嵌入形态下则是 adapter 进程）到 gateway。它不是 end-user authentication：gateway 永远看不到用户凭据，其本身也不授予任何用户级权限。
+- End-user identity 经由可信的 `tenantHeader`/`userHeader` headers 传递。持有 secret 的人可以断言任意 identity，因此 secret 持有者本身必须可信——部署形态下，注入这些 headers 之前先认证用户正是 BFF 的全部职责；嵌入形态下，adapter 进程本身就是可信主体。
+- 浏览器提供的 identity、permission、patient ID、resource ID、`context`、`state`、`forwardedProps`、Tool schema 以及 message 内的 ID 都是不可信的 wire input，永远不能授予 backend authority。
+- Backend Tool 可以从 Agent 推导经过认证的 thread identity：
 
 ```ts
 const identity = ctx.agUi.identityFor(exec.agent)
@@ -172,6 +188,10 @@ app.post('/api/agent', async (c) => {
 ```
 
 BFF 持有 login、session、CSRF、tenant policy、resource authorization、audit 和 rate limits。不要把 Gateway bearer secret 当作 end-user authentication。
+
+### 代理 Host 服务插件 remote
+
+AG-UI gateway 只是众多带 HTTP remote 的 Host-plane service 之一；其他 DSH 服务插件也可以在同一个环回 webserver 上挂载路由。同一条规则覆盖所有这些 remote：浏览器永远不直接访问 Host。每个 remote 都经应用 backend 暴露在应用自己的路由之下，采用上文"认证 → 授权 → 转发"的形态并附带该服务期望的凭据。Host 端口本身保持 loopback，也不向客户端公开。
 
 ## 浏览器客户端
 
@@ -248,6 +268,8 @@ Shared state 是 model/UI collaboration data。它永远不授予 backend author
 ## Dojo-compatible example
 
 Package 以 `dsh-ag-ui/dojo-host` 发布 framework-free BFF plugin。Keyless scripted model、launcher 和五项 feature suite 仍是仅供 source checkout 使用的 fixtures。命令、routes、upstream Dojo 兼容方式、real-model 配置与安全限制见 [examples/dojo/README.zh.md](examples/dojo/README.zh.md)。
+
+Upstream Dojo 的 integration registry 是静态源码，目前没有 `deepseek-harness` 条目，因此本地 upstream 测试暂时复用 Claude Agent SDK TypeScript 菜单项作为纯 URL/path 别名。该别名在注册 DeepSeek Harness 条目的 upstream integration PR 被接受后即会消失；过程中不涉及任何 Claude 运行时、模型或凭据。
 
 ## 嵌入适配器
 

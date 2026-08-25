@@ -6,7 +6,7 @@ English | [简体中文](README.zh.md)
 [![npm version](https://img.shields.io/npm/v/dsh-ag-ui.svg)](https://www.npmjs.com/package/dsh-ag-ui)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-A community [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Host plugin that exposes DSH Agents through the [AG-UI protocol](https://github.com/ag-ui-protocol/ag-ui). It provides an authenticated HTTP/SSE Gateway, AG-UI thread-to-DSH Agent bindings, streamed text and Tool events, browser-owned Tools, and continuation of the same DSH turn after a browser Tool result returns.
+A community [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Host plugin that exposes DSH Agents through the [AG-UI protocol](https://github.com/ag-ui-protocol/ag-ui). It provides an authenticated HTTP/SSE Gateway, AG-UI thread-to-DSH Agent bindings, streamed text and Tool events, browser-owned Tools, and continuation of the same DSH turn after a browser Tool result returns. The same projection core is also available in an embedding form: the separate `dsh-ag-ui-adapter` package spawns a private loopback micro-host behind an AG-UI `AbstractAgent`.
 
 > This is a community project. It is not an official DeepSeek or AG-UI package.
 
@@ -120,18 +120,34 @@ A later Profile patch replaces the bundle row's complete `config`; include every
 
 ## Architecture
 
+One projection core, two supported shapes. The core is the `dsh-ag-ui` Host service: it binds AG-UI threads to DSH Agents and translates runs, events, tools, shared state, and presenter cards in both directions. Everything around it is packaging.
+
 ```text
-Browser
-  -> authenticated application BFF
-  -> POST /ag-ui with Bearer secret and trusted identity headers
-  -> dsh-ag-ui Host Service
-  -> DSH Agent / Session / Tool runtime
-  -> model provider and backend Tools
+Deployment form — BFF Gateway            Embedding form — dsh-ag-ui-adapter
+
+Browser                                   Node.js application
+  -> authenticated application BFF         -> DshAgent (an AG-UI AbstractAgent)
+       bearer secret and trusted                spawns a private micro-host child:
+       identity headers                         - loopback webserver, ephemeral port
+  -> POST /ag-ui on the Host                    - the same published dsh-ag-ui
+  -> dsh-ag-ui Host Service                       gateway row, per-process secret
+  -> DSH Agent / Session / Tool runtime         - the application's spine and
+  -> model provider and backend Tools              model plugin rows
+                                             -> run() over loopback HTTP to the
+                                                same gateway service
 ```
 
-The Gateway binding key is the exact `(tenantId, userId, threadId)` tuple. A browser-supplied identity, permission, patient ID, resource ID, `context`, or `forwardedProps` value never grants backend authority.
+The deployment form fronts a shared Host with an authenticated BFF for browser clients. The embedding form ([`dsh-ag-ui-adapter`](packages/dsh-ag-ui-adapter)) composes a throwaway Host per application process — nothing is spawned before the first run, and the child never outlives the process. Both shapes speak the same protocol to the same projection core, so run semantics, browser Tools, shared state, presenter cards, idempotency, and disposal behave identically.
 
-Backend Tools can derive the authenticated thread identity from the Agent:
+In both forms the gateway binding key is the exact `(tenantId, userId, threadId)` tuple supplied through trusted identity headers.
+
+## Trust posture
+
+- The gateway listens on the Host webserver. Keep that webserver loopback and behind a same-host authenticated BFF; a non-loopback bind requires the explicit `allowNonLoopback` setting and is almost always a mistake.
+- The bearer secret authenticates **one service-to-service hop** — the BFF (or, in the embedding form, the adapter process) to the gateway. It is not end-user authentication: the gateway never sees a user credential and by itself grants nothing user-scoped.
+- End-user identity travels in the trusted `tenantHeader`/`userHeader` headers. Whoever holds the secret can assert any identity, so the secret holder must itself be trustworthy — in the deployment form, authenticating the user before injecting those headers is the BFF's whole job; in the embedding form the adapter process is the trusted principal.
+- Browser-supplied identity, permission, patient ID, resource ID, `context`, `state`, `forwardedProps`, Tool schemas, and IDs inside messages are untrusted wire input and never grant backend authority.
+- Backend Tools can derive the authenticated thread identity from the Agent:
 
 ```ts
 const identity = ctx.agUi.identityFor(exec.agent)
@@ -172,6 +188,10 @@ app.post('/api/agent', async (c) => {
 ```
 
 The BFF owns login, sessions, CSRF protection, tenant policy, resource authorization, audit, and rate limits. Do not treat the Gateway bearer secret as end-user authentication.
+
+### Proxying Host service-plugin remotes
+
+The AG-UI gateway is one Host-plane service with an HTTP remote; other DSH service plugins can mount routes on the same loopback webserver. The same rule covers every one of them: the browser never reaches the Host directly. Expose each remote through the application backend under an application-owned route, with the authenticate → authorize → forward shape above and the credentials that service expects. The Host port itself stays loopback and unadvertised to clients.
 
 ## Browser client
 
@@ -248,6 +268,8 @@ Shared state is model/UI collaboration data. It never grants backend authority a
 ## Dojo-compatible example
 
 The package ships the framework-free BFF plugin as `dsh-ag-ui/dojo-host`. The keyless scripted model, launcher, and five-feature suite remain source-checkout fixtures. See [examples/dojo/README.md](examples/dojo/README.md) for commands, routes, upstream Dojo compatibility, real-model configuration, and security limitations.
+
+The upstream Dojo integration registry is static and has no `deepseek-harness` entry yet, so local upstream testing temporarily reuses the Claude Agent SDK TypeScript menu entry purely as a URL/path alias. The alias disappears once the upstream integration PR registering a DeepSeek Harness entry is accepted; no Claude runtime, model, or credential is involved.
 
 ## Embedded adapter
 
