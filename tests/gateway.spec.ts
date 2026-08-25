@@ -1,13 +1,9 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { HttpAgent } from '@ag-ui/client'
 import { EventType, type BaseEvent, type RunAgentInput, type Tool } from '@ag-ui/core'
-import { Context } from '@deepseek-ai/cordis'
-import type { Fiber } from '@deepseek-ai/cordis'
-import WebServer from '@deepseek-ai/dsh-host-webserver'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
-import { ScriptedAdapter, textResponse, toolCallsResponse, toolResponse } from './scripted-adapter.ts'
-import { mountTestSpine } from './spine.ts'
-import AgUiGateway from 'dsh-ag-ui'
+import { disposeMountedContexts, mountGateway, runAgentEvents } from './harness.ts'
+import { textResponse, toolCallsResponse, toolResponse } from './scripted-adapter.ts'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 
 const SECRET = 'test-only-ag-ui-shared-secret'
@@ -17,37 +13,10 @@ const HEADERS = {
   'x-dsh-user-id': 'clinician-1',
 }
 
-interface Harness {
-  readonly ctx: Context
-  readonly adapter: ScriptedAdapter
-  readonly gateway: Fiber
-  readonly url: string
-}
+afterEach(() => disposeMountedContexts())
 
-const contexts: Context[] = []
-
-afterEach(async () => {
-  for (const ctx of contexts.splice(0).reverse()) await ctx.fiber.dispose()
-})
-
-async function mount(script: StreamChunk[][]): Promise<Harness> {
-  const ctx = new Context()
-  contexts.push(ctx)
-  await ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 })
-  await mountTestSpine(ctx, 'You assist a clinician with the current consultation draft.')
-  const adapter = new ScriptedAdapter(script)
-  ctx.llm.registerAdapter(['scripted'], adapter)
-  const gateway = await ctx.plugin(AgUiGateway, {
-    provider: 'scripted',
-    model: 'scripted',
-    sharedSecret: SECRET,
-    maxRunEvents: 128,
-    maxRunEventBytes: 128 * 1024,
-    frontendToolTimeoutMs: 10_000,
-    threadIdleMs: 60_000,
-  })
-  return { ctx, adapter, gateway, url: `http://127.0.0.1:${String(ctx.webServer.port)}/ag-ui` }
-}
+const mount = (script: StreamChunk[][]) =>
+  mountGateway(script, SECRET, { persona: 'You assist a clinician with the current consultation draft.' })
 
 const BACKEND_TOOL: ToolDefinition = {
   name: 'lookup_backend_record',
@@ -101,11 +70,7 @@ describe('AG-UI Gateway', () => {
       tenantId: 'spoofed-tenant',
     })
     agent.addMessage({ id: 'state-user', role: 'user', content: 'Improve the shared recipe.' })
-    const events: BaseEvent[] = []
-
-    await agent.runAgent({ runId: 'state-run', tools: [], context: [], forwardedProps: {} }, {
-      onEvent: ({ event }) => { events.push(event) },
-    })
+    const events = await runAgentEvents(agent, 'state-run', [])
 
     expect(events.map(event => event.type)).toEqual([
       EventType.RUN_STARTED,
@@ -151,11 +116,7 @@ describe('AG-UI Gateway', () => {
     const agent = new HttpAgent({ url: harness.url, headers: HEADERS, threadId: 'shared-state-unchanged' })
     agent.setState({ status: 'draft', nested: { first: 1, second: 2 } })
     agent.addMessage({ id: 'state-unchanged-user', role: 'user', content: 'Keep the state unchanged.' })
-    const events: BaseEvent[] = []
-
-    await agent.runAgent({ runId: 'state-unchanged-run', tools: [], context: [], forwardedProps: {} }, {
-      onEvent: ({ event }) => { events.push(event) },
-    })
+    const events = await runAgentEvents(agent, 'state-unchanged-run', [])
 
     expect(events.filter(event => event.type === EventType.STATE_SNAPSHOT)).toEqual([
       { type: EventType.STATE_SNAPSHOT, snapshot: { status: 'draft', nested: { first: 1, second: 2 } } },
@@ -249,10 +210,7 @@ describe('AG-UI Gateway', () => {
     agent.addMessage({ id: 'multi-user-1', role: 'user', content: 'Write two assessments.' })
     const tools = [PATCH_TOOL]
 
-    const firstEvents: BaseEvent[] = []
-    await agent.runAgent({ runId: 'multi-run-1', tools, context: [], forwardedProps: {} }, {
-      onEvent: ({ event }) => { firstEvents.push(event) },
-    })
+    const firstEvents = await runAgentEvents(agent, 'multi-run-1', tools)
     expect(firstEvents.map(event => event.type)).toEqual([
       EventType.RUN_STARTED,
       EventType.MESSAGES_SNAPSHOT,
@@ -275,10 +233,7 @@ describe('AG-UI Gateway', () => {
       toolCallId: 'call-draft-a',
       content: JSON.stringify({ status: 'applied', version: 4 }),
     })
-    const secondEvents: BaseEvent[] = []
-    await agent.runAgent({ runId: 'multi-run-2', tools, context: [], forwardedProps: {} }, {
-      onEvent: ({ event }) => { secondEvents.push(event) },
-    })
+    const secondEvents = await runAgentEvents(agent, 'multi-run-2', tools)
     expect(secondEvents.map(event => event.type)).toEqual([
       EventType.RUN_STARTED,
       EventType.MESSAGES_SNAPSHOT,
@@ -293,10 +248,7 @@ describe('AG-UI Gateway', () => {
       toolCallId: 'call-draft-b',
       content: JSON.stringify({ status: 'applied', version: 5 }),
     })
-    const thirdEvents: BaseEvent[] = []
-    await agent.runAgent({ runId: 'multi-run-3', tools, context: [], forwardedProps: {} }, {
-      onEvent: ({ event }) => { thirdEvents.push(event) },
-    })
+    const thirdEvents = await runAgentEvents(agent, 'multi-run-3', tools)
     expect(thirdEvents.map(event => event.type)).toEqual([
       EventType.RUN_STARTED,
       EventType.MESSAGES_SNAPSHOT,
@@ -324,10 +276,7 @@ describe('AG-UI Gateway', () => {
     const agent = new HttpAgent({ url: harness.url, headers: HEADERS, threadId: 'encounter-mixed' })
     agent.addMessage({ id: 'mixed-user-1', role: 'user', content: 'Patch and look up.' })
 
-    const firstEvents: BaseEvent[] = []
-    await agent.runAgent({ runId: 'mixed-run-1', tools: [PATCH_TOOL], context: [], forwardedProps: {} }, {
-      onEvent: ({ event }) => { firstEvents.push(event) },
-    })
+    const firstEvents = await runAgentEvents(agent, 'mixed-run-1', [PATCH_TOOL])
     expect(firstEvents.map(event => event.type)).toEqual([
       EventType.RUN_STARTED,
       EventType.MESSAGES_SNAPSHOT,
@@ -343,10 +292,7 @@ describe('AG-UI Gateway', () => {
       toolCallId: 'mixed-frontend',
       content: JSON.stringify({ status: 'applied', version: 4 }),
     })
-    const secondEvents: BaseEvent[] = []
-    await agent.runAgent({ runId: 'mixed-run-2', tools: [PATCH_TOOL], context: [], forwardedProps: {} }, {
-      onEvent: ({ event }) => { secondEvents.push(event) },
-    })
+    const secondEvents = await runAgentEvents(agent, 'mixed-run-2', [PATCH_TOOL])
     expect(secondEvents.map(event => event.type)).toEqual([
       EventType.RUN_STARTED,
       EventType.MESSAGES_SNAPSHOT,
@@ -380,28 +326,19 @@ describe('AG-UI Gateway', () => {
     const agent = new HttpAgent({ url: harness.url, headers: HEADERS, threadId: 'encounter-history' })
     agent.addMessage({ id: 'user-backend', role: 'user', content: 'Look up record 7.' })
 
-    const backendEvents: BaseEvent[] = []
-    await agent.runAgent({ runId: 'run-backend', tools: [], context: [], forwardedProps: {} }, {
-      onEvent: ({ event }) => { backendEvents.push(event) },
-    })
+    const backendEvents = await runAgentEvents(agent, 'run-backend', [])
     expect(backendEvents.map(event => event.type)).toContain(EventType.TOOL_CALL_RESULT)
     expect(agent.messages.some(message => message.role === 'tool' && message.toolCallId === 'backend-call')).toBe(true)
 
     agent.addMessage({ id: 'user-frontend', role: 'user', content: 'Update the assessment.' })
-    const frontendCallEvents: BaseEvent[] = []
-    await agent.runAgent({ runId: 'run-frontend-call', tools: [PATCH_TOOL], context: [], forwardedProps: {} }, {
-      onEvent: ({ event }) => { frontendCallEvents.push(event) },
-    })
+    const frontendCallEvents = await runAgentEvents(agent, 'run-frontend-call', [PATCH_TOOL])
     agent.addMessage({
       id: 'frontend-result',
       role: 'tool',
       toolCallId: 'frontend-call',
       content: JSON.stringify({ status: 'applied' }),
     })
-    const frontendResultEvents: BaseEvent[] = []
-    await agent.runAgent({ runId: 'run-frontend-result', tools: [PATCH_TOOL], context: [], forwardedProps: {} }, {
-      onEvent: ({ event }) => { frontendResultEvents.push(event) },
-    })
+    const frontendResultEvents = await runAgentEvents(agent, 'run-frontend-result', [PATCH_TOOL])
 
     expect(frontendCallEvents.map(event => event.type)).toContain(EventType.TOOL_CALL_END)
     expect(frontendResultEvents.some(event => event.type === EventType.TOOL_CALL_RESULT)).toBe(false)

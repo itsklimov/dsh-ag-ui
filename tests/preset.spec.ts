@@ -13,6 +13,7 @@ import WebServer from '@deepseek-ai/dsh-host-webserver'
 import type { Config } from 'dsh-ag-ui'
 import AgUiGateway from 'dsh-ag-ui'
 import { ScriptedAdapter, textResponse, toolCallsResponse } from './scripted-adapter.ts'
+import { runAgentEvents } from './harness.ts'
 import { mountTestSpine } from './spine.ts'
 import { durableSessionId } from '../src/session-id.ts'
 import { sessionPresetOf } from '../src/presets.ts'
@@ -71,13 +72,8 @@ function agentFor(url: string, tenantId: string, threadId: string): HttpAgent {
   })
 }
 
-async function collectEvents(agent: HttpAgent, runId: string): Promise<Array<{ type: string, [key: string]: unknown }>> {
-  const events: Array<{ type: string, [key: string]: unknown }> = []
-  await agent.runAgent({ runId, tools: [], context: [], forwardedProps: {} }, {
-    onEvent: ({ event }) => { events.push(event as { type: string, [key: string]: unknown }) },
-  })
-  return events
-}
+const collectEvents = async (agent: HttpAgent, runId: string): Promise<Array<{ type: string, [key: string]: unknown }>> =>
+  await runAgentEvents(agent, runId, []) as Array<{ type: string, [key: string]: unknown }>
 
 describe('agent preset mounting', () => {
   it('composes a thread from the configured preset and serves its tool', async () => {

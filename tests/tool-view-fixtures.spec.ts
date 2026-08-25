@@ -1,16 +1,16 @@
 import { readFile, writeFile } from 'node:fs/promises'
 import { afterEach, describe, expect, it } from 'vitest'
-import { firstValueFrom, from } from 'rxjs'
-import { toArray } from 'rxjs/operators'
-import { HttpAgent, verifyEvents } from '@ag-ui/client'
-import { EventType, type BaseEvent, type CustomEvent } from '@ag-ui/core'
+import { HttpAgent } from '@ag-ui/client'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
-import { Context } from '@deepseek-ai/cordis'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
-import WebServer from '@deepseek-ai/dsh-host-webserver'
-import AgUiGateway, { TOOL_VIEW_NAME } from 'dsh-ag-ui'
-import { ScriptedAdapter, textResponse, toolCallsResponse } from './scripted-adapter.ts'
-import { mountTestSpine } from './spine.ts'
+import {
+  disposeMountedContexts,
+  expectLifecycleValid,
+  mountGateway,
+  runAgentEvents,
+  toolViewEnvelopes,
+} from './harness.ts'
+import { textResponse, toolCallsResponse } from './scripted-adapter.ts'
 
 /**
  * The recorded-event fixture contract of `dsh-ag-ui-cards`: one scripted
@@ -191,70 +191,32 @@ const CALLS = [
   { callId: 'cards-call-8', name: 'web_fetch', args: { url: 'https://ag-ui.com/' } },
 ]
 
-const contexts: Context[] = []
+afterEach(() => disposeMountedContexts())
 
-afterEach(async () => {
-  for (const ctx of contexts.splice(0).reverse()) await ctx.fiber.dispose()
+const mount = (script: StreamChunk[][]) => mountGateway(script, SECRET, {
+  tools: TOOLS,
+  // the recording covers every card kind in one ledger entry, so its bounds are doubled
+  limits: { maxRunEvents: 256, maxRunEventBytes: 512 * 1024 },
 })
-
-async function mount(script: StreamChunk[][]): Promise<string> {
-  const ctx = new Context()
-  contexts.push(ctx)
-  await ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 })
-  await mountTestSpine(ctx)
-  for (const tool of TOOLS) ctx.tools.register(tool)
-  ctx.llm.registerAdapter(['scripted'], new ScriptedAdapter(script))
-  await ctx.plugin(AgUiGateway, {
-    provider: 'scripted',
-    model: 'scripted',
-    sharedSecret: SECRET,
-    maxRunEvents: 256,
-    maxRunEventBytes: 512 * 1024,
-    frontendToolTimeoutMs: 10_000,
-    threadIdleMs: 60_000,
-  })
-  return `http://127.0.0.1:${String(ctx.webServer.port)}/ag-ui`
-}
-
-async function collect(agent: HttpAgent, runId: string): Promise<BaseEvent[]> {
-  const events: BaseEvent[] = []
-  await agent.runAgent({ runId, tools: [], context: [], forwardedProps: {} }, {
-    onEvent: ({ event }) => { events.push(event) },
-  })
-  return events
-}
-
-/** Card envelopes of one recorded stream. */
-function envelopes(events: BaseEvent[], phase?: 'call' | 'result'): CustomEvent[] {
-  return events.filter((event): event is CustomEvent =>
-    event.type === EventType.CUSTOM && event.name === TOOL_VIEW_NAME
-    && (phase === undefined || (event.value as { phase?: string }).phase === phase))
-}
-
-/** Assert a recorded stream satisfies the official lifecycle validator. */
-async function expectLifecycleValid(events: BaseEvent[]): Promise<void> {
-  const replayed = await firstValueFrom(from([...events]).pipe(verifyEvents(), toArray()))
-  expect(replayed).toEqual(events)
-}
 
 describe('tool view card fixtures', () => {
   it('records every card kind live and cold, matching the committed fixture', async () => {
-    const url = await mount([
+    const { url } = await mount([
       toolCallsResponse(CALLS),
       textResponse('Every card recorded.'),
       textResponse('Cold replay recorded.'),
     ])
     const agent = new HttpAgent({ url, headers: HEADERS, threadId: 'cards-fixtures' })
     agent.addMessage({ id: 'cards-user-1', role: 'user', content: 'Record every card kind.' })
-    const first = await collect(agent, 'cards-run-1')
+    const first = await runAgentEvents(agent, 'cards-run-1', [])
     agent.addMessage({ id: 'cards-user-2', role: 'user', content: 'Replay cold.' })
-    const second = await collect(agent, 'cards-run-2')
+    const second = await runAgentEvents(agent, 'cards-run-2', [])
 
     // the live stream carries a call and a result envelope per tool
-    expect(envelopes(first, 'call')).toHaveLength(TOOLS.length)
-    expect(envelopes(first, 'result')).toHaveLength(TOOLS.length)
+    expect(toolViewEnvelopes(first, 'call')).toHaveLength(TOOLS.length)
+    expect(toolViewEnvelopes(first, 'result')).toHaveLength(TOOLS.length)
     // the cold read re-derives exactly the settled cards, after the snapshot
-    const cold = envelopes(second)
+    const cold = toolViewEnvelopes(second)
     expect(cold).toHaveLength(TOOLS.length)
     expect(cold.every(event => (event.value as { phase: string }).phase === 'result')).toBe(true)
     await expectLifecycleValid(first)

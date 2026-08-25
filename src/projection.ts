@@ -28,7 +28,7 @@ function clientUserId(durableId: string): string | undefined {
 }
 
 /** Facts rebuilt from one durable log at cold resume. */
-export interface ColdRecovery {
+interface ColdRecovery {
   /** The log's last turn ended interrupted by crash recovery. */
   readonly interrupted: boolean
   /** Recovered user messages, as (client id, text content) pairs in log order. */
@@ -36,14 +36,14 @@ export interface ColdRecovery {
 }
 
 /** Where a tool call sits inside its DSH session. */
-export interface ToolCallPosition {
+interface ToolCallPosition {
   readonly turn: number
   readonly step: number
   readonly name: string
 }
 
 /** State-tool outcome staged by the thread binding until its durable result. */
-export interface PendingStateCommit {
+interface PendingStateCommit {
   readonly value: unknown
   readonly changed: boolean
 }
@@ -55,12 +55,12 @@ export type ToolCallLifecycle =
   | ({ readonly kind: 'state'; commit?: PendingStateCommit } & ToolCallPosition)
 
 /** How the active AG-UI run should settle after a translated event. */
-export type RunOutcome =
+type RunOutcome =
   | { readonly kind: 'success' }
   | { readonly kind: 'error'; readonly code: string; readonly message: string }
 
 /** Pure translation result for one session event. */
-export interface ProjectionStep {
+interface ProjectionStep {
   readonly events: BaseEvent[]
   readonly outcome?: RunOutcome
 }

@@ -8,7 +8,7 @@
  */
 
 import { AbstractAgent, runHttpRequest, transformHttpEventStream } from '@ag-ui/client'
-import type { AgentConfig, AgentSubscriber, HttpAgentFetchFn, RunAgentParameters, RunAgentResult } from '@ag-ui/client'
+import type { AgentConfig, AgentSubscriber, RunAgentParameters, RunAgentResult } from '@ag-ui/client'
 import type { BaseEvent, RunAgentInput } from '@ag-ui/core'
 import { finalize } from 'rxjs'
 import type { Observable } from 'rxjs'
@@ -31,14 +31,6 @@ export interface DshAgentConfig extends AgentConfig {
   readonly tenantId?: string | undefined
   /** Trusted user identity sent to the gateway; default `local`. */
   readonly userId?: string | undefined
-  /** Tenant identity header name; must match the gateway's `tenantHeader`. */
-  readonly tenantHeader?: string | undefined
-  /** User identity header name; must match the gateway's `userHeader`. */
-  readonly userHeader?: string | undefined
-  /** Extra request headers merged after the adapter-owned ones. */
-  readonly headers?: Record<string, string> | undefined
-  /** Custom fetch used for the loopback run requests. */
-  readonly fetch?: HttpAgentFetchFn | undefined
   /**
    * Milliseconds to wait for the micro-host to report readiness; default
    * 20000. Falls back to `DSH_AG_UI_ADAPTER_READY_TIMEOUT_MS`.
@@ -71,8 +63,6 @@ export class DshAgent extends AbstractAgent {
   private readonly idleShutdownMs: number | undefined
   private idleTimer: NodeJS.Timeout | undefined
   private readonly identityHeaders: Record<string, string>
-  private readonly headers: Record<string, string>
-  private readonly fetchFn: HttpAgentFetchFn
 
   constructor(config: DshAgentConfig) {
     super(config)
@@ -85,13 +75,9 @@ export class DshAgent extends AbstractAgent {
       ...(config.env === undefined ? {} : { env: config.env }),
     }
     this.identityHeaders = {
-      [config.tenantHeader ?? 'x-dsh-tenant-id']: config.tenantId ?? 'dsh-ag-ui-adapter',
-      [config.userHeader ?? 'x-dsh-user-id']: config.userId ?? 'local',
+      'x-dsh-tenant-id': config.tenantId ?? 'dsh-ag-ui-adapter',
+      'x-dsh-user-id': config.userId ?? 'local',
     }
-    this.headers = structuredClone(config.headers ?? {})
-    // bound like HttpAgent's default: a stored bare fetch would be invoked with
-    // the agent as receiver, which a browser's native fetch rejects
-    this.fetchFn = config.fetch ?? ((url, requestInit) => fetch(url, requestInit))
   }
 
   /** Spawn the micro-host and wait for readiness; idempotent. */
@@ -133,7 +119,6 @@ export class DshAgent extends AbstractAgent {
         'Content-Type': 'application/json',
         Accept: 'text/event-stream',
         ...this.identityHeaders,
-        ...this.headers,
       },
       body: JSON.stringify(input),
       signal: this.abortController.signal,
@@ -146,7 +131,7 @@ export class DshAgent extends AbstractAgent {
     const httpEvents = runHttpRequest(async () => {
       this.disarmIdleTimer()
       await this.ensureStarted()
-      return await this.fetchFn(this.url, this.requestInit(input))
+      return await fetch(this.url, this.requestInit(input))
     })
     return transformHttpEventStream(httpEvents).pipe(finalize(() => this.armIdleTimer()))
   }

@@ -407,10 +407,10 @@ git clone https://github.com/CaiZongyuan/dsh-ag-ui.git
 cd dsh-ag-ui
 corepack enable
 pnpm install
-pnpm -r check
+pnpm -r --workspace-root check
 ```
 
-The repository is a pnpm workspace: the root package is the Gateway, and `packages/` holds the `dsh-ag-ui-cards` React card renderers and the `dsh-ag-ui-adapter` embedding adapter. `pnpm -r check` runs lint, strict TypeScript checking, per-file coverage, runtime/type builds, and publint in every package. The Dojo fixture is intentionally source-checkout-only and is not included in the npm tarball.
+The repository is a pnpm workspace: the root package is the Gateway, and `packages/` holds the `dsh-ag-ui-cards` React card renderers and the `dsh-ag-ui-adapter` embedding adapter. `pnpm -r --workspace-root check` runs lint, strict TypeScript checking, per-file coverage, runtime/type builds, and publint in every workspace project. The Dojo fixture is intentionally source-checkout-only and is not included in the npm tarball.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution and release requirements.
 

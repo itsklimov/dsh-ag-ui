@@ -27,7 +27,7 @@ export interface ToolViewEnvelope {
 }
 
 /** The durable outcome handed to a tool's present-result intent. */
-export interface ToolViewResult {
+interface ToolViewResult {
   readonly content: ContentBlock[]
   readonly isError: boolean
   readonly meta?: JsonValue

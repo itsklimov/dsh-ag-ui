@@ -2,17 +2,13 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { firstValueFrom, from } from 'rxjs'
-import { toArray } from 'rxjs/operators'
-import { HttpAgent, verifyEvents } from '@ag-ui/client'
-import { EventType, type BaseEvent, type CustomEvent, type Tool } from '@ag-ui/core'
+import { HttpAgent } from '@ag-ui/client'
+import { EventType, type CustomEvent, type Tool } from '@ag-ui/core'
 import { Context } from '@deepseek-ai/cordis'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
-import WebServer from '@deepseek-ai/dsh-host-webserver'
-import AgUiGateway from 'dsh-ag-ui'
-import { TOOL_VIEW_NAME } from 'dsh-ag-ui'
+import { disposeMountedContexts, expectLifecycleValid, mountGateway, runAgentEvents, toolViewEnvelopes } from './harness.ts'
 import { ScriptedAdapter, textResponse, toolCallsResponse } from './scripted-adapter.ts'
 import { mountTestSpine } from './spine.ts'
 import { durableSessionId } from '../src/session-id.ts'
@@ -88,48 +84,12 @@ const contexts: Context[] = []
 const roots: string[] = []
 
 afterEach(async () => {
+  await disposeMountedContexts()
   for (const ctx of contexts.splice(0).reverse()) await ctx.fiber.dispose()
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 
-async function mount(script: StreamChunk[][]): Promise<{ url: string, ctx: Context }> {
-  const ctx = new Context()
-  contexts.push(ctx)
-  await ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 })
-  await mountTestSpine(ctx)
-  ctx.llm.registerAdapter(['scripted'], new ScriptedAdapter(script))
-  await ctx.plugin(AgUiGateway, {
-    provider: 'scripted',
-    model: 'scripted',
-    sharedSecret: SECRET,
-    maxRunEvents: 128,
-    maxRunEventBytes: 128 * 1024,
-    frontendToolTimeoutMs: 10_000,
-    threadIdleMs: 60_000,
-  })
-  return { url: `http://127.0.0.1:${String(ctx.webServer.port)}/ag-ui`, ctx }
-}
-
-async function collect(agent: HttpAgent, runId: string, tools: Tool[]): Promise<BaseEvent[]> {
-  const events: BaseEvent[] = []
-  await agent.runAgent({ runId, tools, context: [], forwardedProps: {} }, {
-    onEvent: ({ event }) => { events.push(event) },
-  })
-  return events
-}
-
-/** Card envelopes of one stream, projection-phase aware. */
-function envelopes(events: BaseEvent[], phase?: 'call' | 'result'): CustomEvent[] {
-  return events.filter((event): event is CustomEvent =>
-    event.type === EventType.CUSTOM && event.name === TOOL_VIEW_NAME
-    && (phase === undefined || (event.value as { phase?: string }).phase === phase))
-}
-
-/** Assert a recorded stream satisfies the official lifecycle validator. */
-async function expectLifecycleValid(events: BaseEvent[]): Promise<void> {
-  const replayed = await firstValueFrom(from([...events]).pipe(verifyEvents(), toArray()))
-  expect(replayed).toEqual(events)
-}
+const mount = (script: StreamChunk[][]) => mountGateway(script, SECRET)
 
 describe('tool view cards over HTTP', () => {
   it('streams declared call and result cards, then re-derives the identical settled card cold', async () => {
@@ -141,9 +101,9 @@ describe('tool view cards over HTTP', () => {
     harness.ctx.tools.register(VIEW_TOOL)
     const agent = new HttpAgent({ url: harness.url, headers: HEADERS, threadId: 'view-live' })
     agent.addMessage({ id: 'view-user-1', role: 'user', content: 'Probe the records.' })
-    const first = await collect(agent, 'view-run-1', [])
+    const first = await runAgentEvents(agent, 'view-run-1', [])
 
-    const liveCall = envelopes(first, 'call')
+    const liveCall = toolViewEnvelopes(first, 'call')
     expect(liveCall).toHaveLength(1)
     expect(liveCall[0].value).toEqual({
       version: 1,
@@ -152,7 +112,7 @@ describe('tool view cards over HTTP', () => {
       phase: 'call',
       card: { card: 'generic', title: 'Probing records', kind: 'search', rawInput: { subject: 'records' } },
     })
-    const liveResult = envelopes(first, 'result')
+    const liveResult = toolViewEnvelopes(first, 'result')
     expect(liveResult).toHaveLength(1)
     expect(liveResult[0].value).toMatchObject({
       callId: 'view-call-1',
@@ -164,8 +124,8 @@ describe('tool view cards over HTTP', () => {
     await expectLifecycleValid(first)
 
     agent.addMessage({ id: 'view-user-2', role: 'user', content: 'Anything else?' })
-    const second = await collect(agent, 'view-run-2', [])
-    const cold = envelopes(second)
+    const second = await runAgentEvents(agent, 'view-run-2', [])
+    const cold = toolViewEnvelopes(second)
     expect(cold).toHaveLength(1)
     // a cold transcript read derives the identical settled card beside the snapshot
     expect(cold[0].value).toEqual(liveResult[0].value)
@@ -186,9 +146,9 @@ describe('tool view cards over HTTP', () => {
     const agent = new HttpAgent({ url: harness.url, headers: HEADERS, threadId: 'view-excluded' })
     agent.setState({ tone: 'draft' })
     agent.addMessage({ id: 'excluded-user-1', role: 'user', content: 'Do the work.' })
-    const first = await collect(agent, 'view-mixed-1', [RELAY_TOOL])
+    const first = await runAgentEvents(agent, 'view-mixed-1', [RELAY_TOOL])
 
-    const customs = envelopes(first)
+    const customs = toolViewEnvelopes(first)
     expect(customs.map(event => (event.value as { toolName: string }).toolName)).toEqual(['plain_tool', 'plain_tool'])
     expect(customs[0].value).toMatchObject({ phase: 'call', card: { card: 'generic', title: 'plain_tool', rawInput: { note: 'x' } } })
     expect(customs[1].value).toMatchObject({ phase: 'result', card: { card: 'generic' } })
@@ -203,9 +163,9 @@ describe('tool view cards over HTTP', () => {
       toolCallId: 'relay-call-1',
       content: JSON.stringify({ status: 'relayed' }),
     })
-    const second = await collect(agent, 'view-mixed-2', [RELAY_TOOL])
+    const second = await runAgentEvents(agent, 'view-mixed-2', [RELAY_TOOL])
     // the cold read re-derives only the plain backend card; the state tool stays cardless
-    expect(envelopes(second).map(event => (event.value as { toolName: string }).toolName)).toEqual(['plain_tool'])
+    expect(toolViewEnvelopes(second).map(event => (event.value as { toolName: string }).toolName)).toEqual(['plain_tool'])
     expect(second.some(event => event.type === EventType.STATE_SNAPSHOT)).toBe(true)
     await expectLifecycleValid(second)
   })

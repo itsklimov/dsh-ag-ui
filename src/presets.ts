@@ -7,7 +7,7 @@ import type { Context } from '@deepseek-ai/cordis'
  */
 
 /** The subset of the roster's surface this Gateway depends on. */
-export interface AgentPresetsLike {
+interface AgentPresetsLike {
   /** Resolve one preset id to its canonical roster row. */
   resolve(id?: string): Promise<{ readonly id: string }>
   /** Compose one agent from a preset; call inside the agent factory's setup window. */

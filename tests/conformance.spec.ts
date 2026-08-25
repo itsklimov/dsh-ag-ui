@@ -1,15 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { firstValueFrom, from } from 'rxjs'
-import { toArray } from 'rxjs/operators'
-import { HttpAgent, verifyEvents } from '@ag-ui/client'
+import { HttpAgent } from '@ag-ui/client'
 import { EventType, type BaseEvent, type Tool, type ToolCallResultEvent } from '@ag-ui/core'
-import { Context } from '@deepseek-ai/cordis'
-import WebServer from '@deepseek-ai/dsh-host-webserver'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
-import AgUiGateway from 'dsh-ag-ui'
-import { ScriptedAdapter, textResponse, toolCallsResponse, toolResponse } from './scripted-adapter.ts'
-import { mountTestSpine } from './spine.ts'
+import { disposeMountedContexts, expectLifecycleValid, mountGateway, runAgentEvents } from './harness.ts'
+import { textResponse, toolCallsResponse, toolResponse } from './scripted-adapter.ts'
 
 /**
  * Conformance suite for the five AG-UI feature scenarios. Every scenario runs
@@ -25,41 +20,10 @@ const HEADERS = {
   'x-dsh-user-id': 'clinician-1',
 }
 
-interface Harness {
-  readonly ctx: Context
-  readonly url: string
-}
+const mount = (script: StreamChunk[][]) =>
+  mountGateway(script, SECRET, { persona: 'You assist a clinician with the current consultation draft.' })
 
-const contexts: Context[] = []
-
-afterEach(async () => {
-  for (const ctx of contexts.splice(0).reverse()) await ctx.fiber.dispose()
-})
-
-async function mount(script: StreamChunk[][]): Promise<Harness> {
-  const ctx = new Context()
-  contexts.push(ctx)
-  await ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 })
-  await mountTestSpine(ctx, 'You assist a clinician with the current consultation draft.')
-  const adapter = new ScriptedAdapter(script)
-  ctx.llm.registerAdapter(['scripted'], adapter)
-  await ctx.plugin(AgUiGateway, {
-    provider: 'scripted',
-    model: 'scripted',
-    sharedSecret: SECRET,
-    maxRunEvents: 128,
-    maxRunEventBytes: 128 * 1024,
-    frontendToolTimeoutMs: 10_000,
-    threadIdleMs: 60_000,
-  })
-  return { ctx, url: `http://127.0.0.1:${String(ctx.webServer.port)}/ag-ui` }
-}
-
-/** Assert a recorded stream satisfies the official lifecycle validator. */
-async function expectLifecycleValid(events: BaseEvent[]): Promise<void> {
-  const replayed = await firstValueFrom(from([...events]).pipe(verifyEvents(), toArray()))
-  expect(replayed).toEqual(events)
-}
+afterEach(() => disposeMountedContexts())
 
 /** Backend tool whose durable result is a fixed JSON payload. */
 function backendTool(name: string, description: string, properties: Record<string, unknown>, required: string[], result: object): ToolDefinition {
@@ -105,14 +69,6 @@ const DRAFT_TOOL: Tool = {
   },
 }
 
-async function collect(agent: HttpAgent, runId: string, tools: Tool[]): Promise<BaseEvent[]> {
-  const events: BaseEvent[] = []
-  await agent.runAgent({ runId, tools, context: [], forwardedProps: {} }, {
-    onEvent: ({ event }) => { events.push(event) },
-  })
-  return events
-}
-
 describe('AG-UI five-feature conformance', () => {
   it('the lifecycle arbiter rejects an out-of-order stream', async () => {
     const broken = [
@@ -127,7 +83,7 @@ describe('AG-UI five-feature conformance', () => {
     const harness = await mount([textResponse('The consultation draft looks consistent.')])
     const agent = new HttpAgent({ url: harness.url, headers: HEADERS, threadId: 'conformance-chat' })
     agent.addMessage({ id: 'chat-user', role: 'user', content: 'Review my draft.' })
-    const events = await collect(agent, 'chat-run', [])
+    const events = await runAgentEvents(agent, 'chat-run', [])
 
     expect(events.map(event => event.type)).toEqual([
       EventType.RUN_STARTED,
@@ -150,8 +106,8 @@ describe('AG-UI five-feature conformance', () => {
     harness.ctx.tools.register(BACKEND_TOOL)
     const agent = new HttpAgent({ url: harness.url, headers: HEADERS, threadId: 'conformance-history' })
     agent.addMessage({ id: 'history-user', role: 'user', content: 'Look up record 7.' })
-    const first = await collect(agent, 'history-run-1', [])
-    const second = await collect(agent, 'history-run-2', [])
+    const first = await runAgentEvents(agent, 'history-run-1', [])
+    const second = await runAgentEvents(agent, 'history-run-2', [])
 
     const streamedAssistant = first.find(event => event.type === EventType.TEXT_MESSAGE_START)
     const streamedResult = first.find((event): event is ToolCallResultEvent =>
@@ -178,7 +134,7 @@ describe('AG-UI five-feature conformance', () => {
     harness.ctx.tools.register(BACKEND_TOOL)
     const agent = new HttpAgent({ url: harness.url, headers: HEADERS, threadId: 'conformance-backend-tool' })
     agent.addMessage({ id: 'backend-user', role: 'user', content: 'Look up record 7.' })
-    const events = await collect(agent, 'backend-run', [])
+    const events = await runAgentEvents(agent, 'backend-run', [])
 
     expect(events.map(event => event.type)).toEqual([
       EventType.RUN_STARTED,
@@ -212,7 +168,7 @@ describe('AG-UI five-feature conformance', () => {
     const agent = new HttpAgent({ url: harness.url, headers: HEADERS, threadId: 'conformance-shared-state' })
     agent.setState({ status: 'draft' })
     agent.addMessage({ id: 'state-user', role: 'user', content: 'Finalize the shared state.' })
-    const events = await collect(agent, 'state-run', [])
+    const events = await runAgentEvents(agent, 'state-run', [])
 
     expect(events.map(event => event.type)).toEqual([
       EventType.RUN_STARTED,
@@ -238,7 +194,7 @@ describe('AG-UI five-feature conformance', () => {
     ])
     const agent = new HttpAgent({ url: harness.url, headers: HEADERS, threadId: 'conformance-hitl' })
     agent.addMessage({ id: 'hitl-user', role: 'user', content: 'Write the assessment here.' })
-    const parkEvents = await collect(agent, 'hitl-run-1', [DRAFT_TOOL])
+    const parkEvents = await runAgentEvents(agent, 'hitl-run-1', [DRAFT_TOOL])
 
     expect(parkEvents.map(event => event.type)).toEqual([
       EventType.RUN_STARTED,
@@ -256,7 +212,7 @@ describe('AG-UI five-feature conformance', () => {
       toolCallId: 'conformance-frontend-call',
       content: JSON.stringify({ status: 'applied', version: 4 }),
     })
-    const resumeEvents = await collect(agent, 'hitl-run-2', [DRAFT_TOOL])
+    const resumeEvents = await runAgentEvents(agent, 'hitl-run-2', [DRAFT_TOOL])
 
     expect(resumeEvents.map(event => event.type)).toEqual([
       EventType.RUN_STARTED,
@@ -280,7 +236,7 @@ describe('AG-UI five-feature conformance', () => {
     ])
     const agent = new HttpAgent({ url: harness.url, headers: HEADERS, threadId: 'conformance-hitl-multi' })
     agent.addMessage({ id: 'hitl-multi-user', role: 'user', content: 'Write two assessments.' })
-    const parkEvents = await collect(agent, 'hitl-multi-run-1', [DRAFT_TOOL])
+    const parkEvents = await runAgentEvents(agent, 'hitl-multi-run-1', [DRAFT_TOOL])
 
     expect(parkEvents.map(event => event.type)).toEqual([
       EventType.RUN_STARTED,
@@ -301,7 +257,7 @@ describe('AG-UI five-feature conformance', () => {
       toolCallId: 'conformance-draft-a',
       content: JSON.stringify({ status: 'applied', version: 4 }),
     })
-    const subsetEvents = await collect(agent, 'hitl-multi-run-2', [DRAFT_TOOL])
+    const subsetEvents = await runAgentEvents(agent, 'hitl-multi-run-2', [DRAFT_TOOL])
     expect(subsetEvents.map(event => event.type)).toEqual([
       EventType.RUN_STARTED,
       EventType.MESSAGES_SNAPSHOT,
@@ -315,7 +271,7 @@ describe('AG-UI five-feature conformance', () => {
       toolCallId: 'conformance-draft-b',
       content: JSON.stringify({ status: 'applied', version: 5 }),
     })
-    const resumeEvents = await collect(agent, 'hitl-multi-run-3', [DRAFT_TOOL])
+    const resumeEvents = await runAgentEvents(agent, 'hitl-multi-run-3', [DRAFT_TOOL])
     expect(resumeEvents.map(event => event.type)).toEqual([
       EventType.RUN_STARTED,
       EventType.MESSAGES_SNAPSHOT,
@@ -336,7 +292,7 @@ describe('AG-UI five-feature conformance', () => {
     harness.ctx.tools.register(RECIPE_TOOL)
     const agent = new HttpAgent({ url: harness.url, headers: HEADERS, threadId: 'conformance-generative-ui' })
     agent.addMessage({ id: 'recipe-user', role: 'user', content: 'Compose a recipe card for dinner.' })
-    const events = await collect(agent, 'recipe-run', [])
+    const events = await runAgentEvents(agent, 'recipe-run', [])
 
     expect(events.map(event => event.type)).toEqual([
       EventType.RUN_STARTED,

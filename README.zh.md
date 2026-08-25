@@ -407,10 +407,10 @@ git clone https://github.com/CaiZongyuan/dsh-ag-ui.git
 cd dsh-ag-ui
 corepack enable
 pnpm install
-pnpm -r check
+pnpm -r --workspace-root check
 ```
 
-本仓库是 pnpm workspace：根 package 即 Gateway，`packages/` 下是 `dsh-ag-ui-cards` React card 渲染包与 `dsh-ag-ui-adapter` 嵌入适配包。`pnpm -r check` 会在每个 package 内运行 lint、strict TypeScript、per-file coverage、runtime/type builds 和 publint。Dojo fixture 仅用于 source checkout，不包含在 npm tarball 中。
+本仓库是 pnpm workspace：根 package 即 Gateway，`packages/` 下是 `dsh-ag-ui-cards` React card 渲染包与 `dsh-ag-ui-adapter` 嵌入适配包。`pnpm -r --workspace-root check` 会在每个 workspace project 内运行 lint、strict TypeScript、per-file coverage、runtime/type builds 和 publint。Dojo fixture 仅用于 source checkout，不包含在 npm tarball 中。
 
 贡献和发布要求见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
