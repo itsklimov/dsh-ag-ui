@@ -14,7 +14,7 @@
 
 - 通过 `ctx.agUi` 暴露的标准 Cordis `Service` 插件
 - 可使用 `dsh plugin add` 安装的 DSH Profile Bundle
-- 精确锁定 AG-UI `0.0.58` protocol packages
+- 下限式 AG-UI 协议范围（`~0.0.58`）
 - 使用可信 tenant/user headers 的 BFF-to-Gateway 认证
 - `(tenantId, userId, threadId)` 到 DSH Agent 的进程内绑定
 - AG-UI 文本流与 backend Tool result 投影
@@ -168,10 +168,10 @@ BFF 持有 login、session、CSRF、tenant policy、resource authorization、aud
 
 ## 浏览器客户端
 
-在 frontend application 中安装锁定版本的官方 client：
+在 frontend application 中安装官方 client。支持协议范围（`>=0.0.58 <0.1.0`）内的任意版本均可；网关不要求 client 精确锁版：
 
 ```bash
-pnpm add @ag-ui/client@0.0.58
+pnpm add @ag-ui/client
 ```
 
 在每个 run 中发送页面相关的 browser Tools 与当前 context：
@@ -270,13 +270,13 @@ Backend Tool result 会发出 `TOOL_CALL_RESULT`。Frontend Tool result 不在 A
 
 所有 effect 都属于 Cordis plugin fiber。Route removal、idle expiry、timeout 和 plugin disposal 会注销 browser Tools、拒绝 pending calls、取消 active work、dispose Agent handles，并等待完全停稳。
 
-意外 HTTP disconnect 会取消 Gateway-owned DSH turn。`HttpAgent@0.0.58` 不支持 partial SSE reconnect。Frontend Tool handoff 是 intentional completed run，不会取消 parked turn。
+意外 HTTP disconnect 会取消 Gateway-owned DSH turn。`HttpAgent` 不支持 partial SSE reconnect。Frontend Tool handoff 是 intentional completed run，不会取消 parked turn。
 
 ## 兼容性
 
 | 组件 | 支持版本 |
 | --- | --- |
-| AG-UI core/client/encoder | `0.0.58` |
+| AG-UI core/client/encoder | `>=0.0.58 <0.1.0`（`~0.0.58`；已用 `0.0.58` 验证） |
 | Node.js | `^22.19.0` 或 `>=24.0.0` |
 | DeepSeek Harness | `peerDependencies` 中列出的 developer preview packages |
 

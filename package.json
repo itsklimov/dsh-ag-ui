@@ -80,8 +80,8 @@
     "prepack": "pnpm build"
   },
   "dependencies": {
-    "@ag-ui/core": "0.0.58",
-    "@ag-ui/encoder": "0.0.58",
+    "@ag-ui/core": "~0.0.58",
+    "@ag-ui/encoder": "~0.0.58",
     "@deepseek-ai/schemastery": "3.18.1"
   },
   "peerDependencies": {
@@ -94,7 +94,7 @@
     "@deepseek-ai/dsh-tools": "0.1.1-rc.2"
   },
   "devDependencies": {
-    "@ag-ui/client": "0.0.58",
+    "@ag-ui/client": "~0.0.58",
     "@deepseek-ai/cordis": "4.0.1",
     "@deepseek-ai/cordis-plugin-include": "1.0.6",
     "@deepseek-ai/cordis-plugin-loader": "1.0.2",

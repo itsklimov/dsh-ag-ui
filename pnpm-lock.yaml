@@ -9,17 +9,17 @@ importers:
   .:
     dependencies:
       '@ag-ui/core':
-        specifier: 0.0.58
+        specifier: ~0.0.58
         version: 0.0.58
       '@ag-ui/encoder':
-        specifier: 0.0.58
+        specifier: ~0.0.58
         version: 0.0.58
       '@deepseek-ai/schemastery':
         specifier: 3.18.1
         version: 3.18.1
     devDependencies:
       '@ag-ui/client':
-        specifier: 0.0.58
+        specifier: ~0.0.58
         version: 0.0.58
       '@deepseek-ai/cordis':
         specifier: 4.0.1

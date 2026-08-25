@@ -14,7 +14,7 @@ A community [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 
 
 - Standard Cordis `Service` plugin exposed as `ctx.agUi`
 - Installable DSH Profile Bundle through `dsh plugin add`
-- Pinned AG-UI `0.0.58` protocol packages
+- Floored AG-UI protocol range (`~0.0.58`)
 - Authenticated BFF-to-Gateway requests with trusted tenant and user headers
 - Process-local `(tenantId, userId, threadId)` bindings to DSH Agents
 - AG-UI text streaming and backend Tool result projection
@@ -168,10 +168,10 @@ The BFF owns login, sessions, CSRF protection, tenant policy, resource authoriza
 
 ## Browser client
 
-Install the pinned official client in the frontend application:
+Install the official client in the frontend application. Any release in the supported protocol range (`>=0.0.58 <0.1.0`) works; the gateway never requires an exact client pin:
 
 ```bash
-pnpm add @ag-ui/client@0.0.58
+pnpm add @ag-ui/client
 ```
 
 Send page-specific browser Tools and current context on every run:
@@ -270,13 +270,13 @@ Backend Tool results are emitted as `TOOL_CALL_RESULT`. Frontend Tool results ar
 
 All effects belong to the Cordis plugin fiber. Route removal, idle expiry, timeout, and plugin disposal unregister browser Tools, reject pending calls, cancel active work, dispose Agent handles, and wait for quiescence.
 
-An unexpected HTTP disconnect cancels the Gateway-owned DSH turn. `HttpAgent@0.0.58` does not implement partial SSE reconnect. A frontend Tool handoff is an intentional completed run and does not cancel the parked turn.
+An unexpected HTTP disconnect cancels the Gateway-owned DSH turn. `HttpAgent` does not implement partial SSE reconnect. A frontend Tool handoff is an intentional completed run and does not cancel the parked turn.
 
 ## Compatibility
 
 | Component | Supported version |
 | --- | --- |
-| AG-UI core/client/encoder | `0.0.58` |
+| AG-UI core/client/encoder | `>=0.0.58 <0.1.0` (`~0.0.58`; tested with `0.0.58`) |
 | Node.js | `^22.19.0` or `>=24.0.0` |
 | DeepSeek Harness | Developer preview packages listed in `peerDependencies` |
 
