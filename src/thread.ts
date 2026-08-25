@@ -9,7 +9,6 @@ import {
 } from '@ag-ui/core'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import { createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
-import type { ContentBlock, ToolResultBlock } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import {
   assertObjectJsonSchema,
@@ -22,11 +21,11 @@ import { randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import { AgUiGatewayError } from './errors.ts'
 import { jsonBytes, valueDigest } from './json.ts'
+import { SessionProjection, STATE_TOOL_NAME } from './projection.ts'
 import { RunController, type RunRecord } from './run.ts'
 import type { AgUiPrincipal, AgUiThreadIdentity } from './types.ts'
 
 const FRONTEND_TOOL_NAME = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/
-const STATE_TOOL_NAME = 'ag_ui_update_state'
 
 /** Runtime limits and model route resolved from Gateway config. */
 export interface ThreadOptions {
@@ -56,22 +55,6 @@ interface PendingFrontendCall {
   reject(error: Error): void
 }
 
-interface ToolCallPosition {
-  readonly turn: number
-  readonly step: number
-  readonly name: string
-}
-
-type ToolCallLifecycle =
-  | ({ readonly kind: 'backend' } & ToolCallPosition)
-  | ({ readonly kind: 'frontend'; readonly parked: true } & ToolCallPosition)
-  | ({ readonly kind: 'state'; commit?: PendingStateCommit } & ToolCallPosition)
-
-interface TextProjection {
-  readonly messageId: string
-  started: boolean
-}
-
 interface PreparedFrontendTool {
   readonly tool: AgUiTool
   readonly fingerprint: string
@@ -83,17 +66,14 @@ interface SharedStateBaseline {
   readonly value: unknown
 }
 
-interface PendingStateCommit {
-  readonly value: unknown
-  readonly changed: boolean
-}
-
 /** One authenticated process-local AG-UI thread and its owned DSH Agent. */
 export class ThreadBinding {
   /** Random DSH Agent and Session identity, never derived from a client thread id. */
   readonly sessionId = SessionId(`ag-ui-${randomUUID()}`)
   /** Authenticated principal and client thread tuple owning this binding. */
   readonly identity: AgUiThreadIdentity
+  /** Pure session-event to wire-event translation owned by this thread. */
+  private readonly projection = new SessionProjection(this.sessionId)
 
   private handle: AgentHandle | undefined
   private agent: Agent | undefined
@@ -104,12 +84,7 @@ export class ThreadBinding {
   private readonly frontendTools = new Map<string, FrontendToolRegistration>()
   private stagedTools: AgUiTool[] | undefined
   private readonly pendingCalls = new Map<string, PendingFrontendCall>()
-  private readonly serverResultCallIds = new Set<string>()
   private readonly runLedger = new Map<string, RunRecord>()
-  private readonly toolCallLifecycles = new Map<string, ToolCallLifecycle>()
-  private readonly frontendSteps = new Set<string>()
-  private readonly text = new Map<string, TextProjection>()
-  private sharedState: unknown
   private sharedStateActive = false
   private stateToolDispose: (() => void) | undefined
 
@@ -295,9 +270,8 @@ export class ThreadBinding {
     this.pendingCalls.clear()
     this.stateToolDispose?.()
     this.stateToolDispose = undefined
-    this.sharedState = undefined
+    this.projection.sharedState = undefined
     this.sharedStateActive = false
-    this.toolCallLifecycles.clear()
     for (const registration of this.frontendTools.values()) registration.dispose()
     this.frontendTools.clear()
     const handle = this.handle
@@ -329,7 +303,7 @@ export class ThreadBinding {
       }
       if (message.role === 'tool') {
         if (this.pendingCalls.has(message.toolCallId)) tools.push(message)
-        else if (this.serverResultCallIds.delete(message.toolCallId)) {
+        else if (this.projection.consumeServerResult(message.toolCallId)) {
           this.acceptedMessages.set(message.id, { role: 'tool', digest })
         } else {
           throw new AgUiGatewayError('UNKNOWN_TOOL_RESULT', 'The Tool result has no pending or completed server call.', 409)
@@ -386,7 +360,7 @@ export class ThreadBinding {
       && (input.state === undefined || input.state === null || isEmptyStateContainer(input.state))) {
       return { active: false, value: undefined }
     }
-    const value = input.state === undefined ? this.sharedState : structuredClone(input.state)
+    const value = input.state === undefined ? this.projection.sharedState : structuredClone(input.state)
     if (jsonBytes(value, 'state') > this.options.maxStateBytes) {
       throw new AgUiGatewayError('STATE_LIMIT_EXCEEDED', 'state exceeds its limit.', 413)
     }
@@ -418,7 +392,7 @@ export class ThreadBinding {
     /* v8 ignore next -- run admission owns the active controller through baseline commit. */
     if (active === undefined) throw new Error('Shared state has no active AG-UI run')
     this.ensureStateTool()
-    this.sharedState = structuredClone(baseline.value)
+    this.projection.sharedState = structuredClone(baseline.value)
     this.sharedStateActive = true
     active.emit({ type: EventType.STATE_SNAPSHOT, snapshot: structuredClone(baseline.value) })
   }
@@ -451,11 +425,11 @@ export class ThreadBinding {
   private prepareSharedStateUpdate(args: unknown, exec: ToolRunContext): string {
     if (!this.sharedStateActive) throw new Error('Shared state is not active for this AG-UI thread')
     const callId = String(exec.callId)
-    const lifecycle = this.toolCallLifecycles.get(callId)
+    const lifecycle = this.projection.lifecycleOf(callId)
     if (lifecycle?.kind !== 'state') throw new Error('Shared-state update has no DSH call position')
     if (lifecycle.commit !== undefined) throw new Error('Shared-state update is already pending')
     const updates = readStateUpdates(args)
-    const current = this.sharedState
+    const current = this.projection.sharedState
     const next = isUnknownRecord(current)
       ? { ...current, ...updates }
       : { ...updates }
@@ -469,7 +443,7 @@ export class ThreadBinding {
       if (active === undefined) throw new Error('Shared-state update has no active AG-UI run')
       active.assertCanEmit({ type: EventType.STATE_SNAPSHOT, snapshot: next })
     }
-    lifecycle.commit = { value: structuredClone(next), changed }
+    this.projection.stageCommit(callId, { value: structuredClone(next), changed })
     return JSON.stringify({ status: changed ? 'updated' : 'unchanged', state: next })
   }
 
@@ -542,14 +516,11 @@ export class ThreadBinding {
     const violations = validateJsonSchemaValue(schema, args, '')
     if (violations.length > 0) throw new Error(`Invalid frontend Tool arguments: ${violations.join('; ')}`)
     const callId = String(exec.callId)
-    const lifecycle = this.toolCallLifecycles.get(callId)
+    const lifecycle = this.projection.lifecycleOf(callId)
     if (lifecycle?.kind !== 'backend' || lifecycle.name !== name) throw new Error('Frontend Tool call has no DSH call position')
     const active = this.activeRun
     if (active === undefined || active.turn !== lifecycle.turn) throw new Error('Frontend Tool call has no active AG-UI run')
-    const stepKey = `${String(lifecycle.turn)}:${String(lifecycle.step)}`
-    if (this.frontendSteps.has(stepKey)) throw new Error('Only one frontend Tool call is allowed per DSH step')
-    this.frontendSteps.add(stepKey)
-    this.toolCallLifecycles.set(callId, { ...lifecycle, kind: 'frontend', parked: true })
+    if (!this.projection.markParked(callId, lifecycle)) throw new Error('Only one frontend Tool call is allowed per DSH step')
 
     const deferred = Promise.withResolvers<string>()
     let settled = false
@@ -584,141 +555,30 @@ export class ThreadBinding {
 
   private onSessionEvent(event: SessionEvent): void {
     const active = this.activeRun
-    if (event.type === 'step/end') {
-      this.frontendSteps.delete(`${String(event.data.turn)}:${String(event.data.step)}`)
-      if (this.stagedTools !== undefined && active?.turn === event.data.turn) {
-        const staged = this.stagedTools
-        this.stagedTools = undefined
-        try {
-          this.applyFrontendTools(staged)
-        } catch (error) {
-          active.error('FRONTEND_TOOL_SYNC_FAILED', 'The frontend Tool set could not be updated.')
-          this.liveAgent.cancel({ kind: 'hook', reason: `AG-UI frontend Tool sync failed: ${errorChain(error)}` })
-        }
+    const step = this.projection.project(event, active?.turn)
+    if (event.type === 'step/end' && this.stagedTools !== undefined && active?.turn === event.data.turn) {
+      const staged = this.stagedTools
+      this.stagedTools = undefined
+      try {
+        this.applyFrontendTools(staged)
+      } catch (error) {
+        active.error('FRONTEND_TOOL_SYNC_FAILED', 'The frontend Tool set could not be updated.')
+        this.liveAgent.cancel({ kind: 'hook', reason: `AG-UI frontend Tool sync failed: ${errorChain(error)}` })
       }
     }
-    if (active === undefined || active.turn === undefined || !eventBelongsToTurn(event, active.turn)) return
-
-    switch (event.type) {
-      case 'assistant/chunk': {
-        if (event.data.chunk.type !== 'text-delta') break
-        const projection = this.textProjection(event.data.turn, event.data.step)
-        if (!projection.started) {
-          projection.started = true
-          active.emit({ type: EventType.TEXT_MESSAGE_START, messageId: projection.messageId, role: 'assistant' })
-        }
-        active.emit({ type: EventType.TEXT_MESSAGE_CONTENT, messageId: projection.messageId, delta: event.data.chunk.text })
-        break
-      }
-      case 'assistant/message': {
-        const projection = this.textProjection(event.data.turn, event.data.step)
-        if (!projection.started) {
-          const text = event.data.message.content
-            .filter((block): block is Extract<ContentBlock, { type: 'text' }> => block.type === 'text')
-            .map(block => block.text)
-            .join('')
-          if (text !== '') {
-            active.emit({ type: EventType.TEXT_MESSAGE_START, messageId: projection.messageId, role: 'assistant' })
-            active.emit({ type: EventType.TEXT_MESSAGE_CONTENT, messageId: projection.messageId, delta: text })
-            projection.started = true
-          }
-        }
-        if (projection.started) active.emit({ type: EventType.TEXT_MESSAGE_END, messageId: projection.messageId })
-        break
-      }
-      case 'tool/call': {
-        const callId = String(event.data.callId)
-        this.toolCallLifecycles.set(callId, {
-          kind: event.data.name === STATE_TOOL_NAME ? 'state' : 'backend',
-          turn: event.data.turn,
-          step: event.data.step,
-          name: event.data.name,
-        })
-        if (event.data.name === STATE_TOOL_NAME) break
-        active.emit({
-          type: EventType.TOOL_CALL_START,
-          toolCallId: callId,
-          toolCallName: event.data.name,
-          parentMessageId: assistantMessageId(this.sessionId, event.data.turn, event.data.step),
-        })
-        active.emit({ type: EventType.TOOL_CALL_ARGS, toolCallId: callId, delta: event.data.arguments })
-        active.emit({ type: EventType.TOOL_CALL_END, toolCallId: callId })
-        break
-      }
-      case 'tool/result': {
-        const block = event.data.message.content[0]
-        const callId = String(block.toolCallId)
-        const lifecycle = this.toolCallLifecycles.get(callId)
-        this.toolCallLifecycles.delete(callId)
-        if (lifecycle?.kind === 'state') {
-          const commit = lifecycle.commit
-          if (commit !== undefined && !block.isError && commit.changed) {
-            this.sharedState = structuredClone(commit.value)
-            active.emit({ type: EventType.STATE_SNAPSHOT, snapshot: structuredClone(commit.value) })
-          }
-          break
-        }
-        if (lifecycle?.kind !== 'frontend') {
-          this.serverResultCallIds.add(callId)
-          active.emit({
-            type: EventType.TOOL_CALL_RESULT,
-            messageId: `ag-ui:${String(this.sessionId)}:${callId}:result`,
-            toolCallId: callId,
-            content: renderToolResult(block),
-            role: 'tool',
-          })
-        }
-        break
-      }
-      case 'turn/end': {
-        this.clearToolCallsForTurn(event.data.turn)
-        switch (event.data.reason.kind) {
-          case 'completed':
-          case 'max-tokens':
-            active.success()
-            break
-          case 'error':
-            active.error(event.data.reason.error.code, event.data.reason.error.message)
-            break
-          case 'aborted':
-            active.error('AGENT_ABORTED', 'The DSH turn was aborted.')
-            break
-          case 'blocked':
-            active.error('AGENT_BLOCKED', 'The DSH turn was blocked before completion.')
-            break
-          case 'interrupted':
-            active.error('AGENT_INTERRUPTED', 'The stored DSH turn was interrupted.')
-            break
-          default:
-            active.error('AGENT_EXECUTION_ERROR', 'The DSH turn ended with an unsupported reason.')
-        }
-        break
-      }
-      default:
-        break
+    if (active === undefined || active.turn === undefined) return
+    if (step.outcome !== undefined) {
+      if (step.outcome.kind === 'success') active.success()
+      else active.error(step.outcome.code, step.outcome.message)
+      return
     }
-  }
-
-  private clearToolCallsForTurn(turn: number): void {
-    for (const [callId, lifecycle] of this.toolCallLifecycles) {
-      if (lifecycle.turn === turn) this.toolCallLifecycles.delete(callId)
-    }
+    for (const wireEvent of step.events) active.emit(wireEvent)
   }
 
   private onAgentError(error: unknown): void {
     const active = this.activeRun
     if (active === undefined || active.record.state !== 'active') return
     active.error('AGENT_EXECUTION_ERROR', errorChain(error))
-  }
-
-  private textProjection(turn: number, step: number): TextProjection {
-    const key = `${String(turn)}:${String(step)}`
-    let projection = this.text.get(key)
-    if (projection === undefined) {
-      projection = { messageId: assistantMessageId(this.sessionId, turn, step), started: false }
-      this.text.set(key, projection)
-    }
-    return projection
   }
 
   private checkGlobalCollisions(): void {
@@ -781,28 +641,4 @@ function readStateUpdates(args: unknown): Record<string, unknown> {
     throw new Error('Shared-state updates must contain a state_updates object')
   }
   return structuredClone(args.state_updates)
-}
-
-/** Whether a durable event carries the selected turn. */
-function eventBelongsToTurn(event: SessionEvent, turn: number): boolean {
-  if (!('turn' in event.data)) return false
-  return event.data.turn === turn
-}
-
-/** Deterministic AG-UI assistant message identity for one DSH step. */
-function assistantMessageId(sessionId: SessionId, turn: number, step: number): string {
-  return `ag-ui:${String(sessionId)}:${String(turn)}:${String(step)}:assistant`
-}
-
-/** Flatten DSH model-facing Tool content into the AG-UI string result field. */
-function renderToolResult(block: ToolResultBlock): string {
-  const text: string[] = []
-  for (const content of block.content) {
-    if (content.type === 'text') text.push(content.text)
-    else if (content.type === 'reasoning') text.push(content.text)
-    else if (content.type === 'image') text.push('[image result]')
-    else if (content.type === 'tool-call') text.push(`[nested tool call: ${content.name}]`)
-    else text.push(renderToolResult(content))
-  }
-  return text.join('\n')
 }
