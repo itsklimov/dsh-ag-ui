@@ -6,7 +6,7 @@ English | [简体中文](README.zh.md)
 [![npm version](https://img.shields.io/npm/v/dsh-ag-ui.svg)](https://www.npmjs.com/package/dsh-ag-ui)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-A community [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Host plugin that exposes DSH Agents through the [AG-UI protocol](https://github.com/ag-ui-protocol/ag-ui). It provides an authenticated HTTP/SSE Gateway, AG-UI thread-to-DSH Agent bindings, streamed text and Tool events, browser-owned Tools, and continuation of the same DSH turn after a browser Tool result returns.
+A community [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Host plugin that exposes DSH Agents through the [AG-UI protocol](https://github.com/ag-ui-protocol/ag-ui). It provides an authenticated HTTP/SSE Gateway, AG-UI thread-to-DSH Agent bindings, streamed text and Tool events, browser-owned Tools, and continuation of the same DSH turn after a browser Tool result returns. The same projection core is also available in an embedding form: the separate `dsh-ag-ui-adapter` package spawns a private loopback micro-host behind an AG-UI `AbstractAgent`.
 
 > This is a community project. It is not an official DeepSeek or AG-UI package.
 
@@ -14,13 +14,16 @@ A community [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 
 
 - Standard Cordis `Service` plugin exposed as `ctx.agUi`
 - Installable DSH Profile Bundle through `dsh plugin add`
-- Pinned AG-UI `0.0.58` protocol packages
+- Floored AG-UI protocol range (`~0.0.58`)
 - Authenticated BFF-to-Gateway requests with trusted tenant and user headers
 - Process-local `(tenantId, userId, threadId)` bindings to DSH Agents
 - AG-UI text streaming and backend Tool result projection
 - Agent-scoped browser Tools supplied by `RunAgentInput.tools`
 - Frontend Tool Promise parking and ToolMessage continuation across HTTP runs
 - Bidirectional shared state through `RunAgentInput.state`, `ag_ui_update_state`, and `STATE_SNAPSHOT`
+- Presenter cards for backend Tool calls as versioned `dsh:tool:view` CUSTOM events, live and on cold replay
+- React renderers for every card kind in the separate `dsh-ag-ui-cards` package, with component tests against recorded gateway events
+- An embedding adapter in the separate `dsh-ag-ui-adapter` package that spawns a loopback DSH micro-host and serves it as an AG-UI `AbstractAgent`
 - A keyless Dojo-compatible example for five standard AG-UI features
 - Run and message idempotency
 - Bounded requests, context, Tool schemas, event buffers, threads, and run ledgers
@@ -87,6 +90,8 @@ A later Profile patch replaces the bundle row's complete `config`; include every
 | `path` | `/ag-ui` | Exact Host HTTP route |
 | `provider` | required | Registered DSH model provider route |
 | `model` | required | Model ID owned by the provider |
+| `agentPreset` | none | Deployment-default agent preset id composed into every thread |
+| `tenantPresets` | `{}` | Per-tenant preset ids taking precedence over `agentPreset` |
 | `sharedSecret` | required | Bearer secret shared only with the trusted BFF |
 | `tenantHeader` | `x-dsh-tenant-id` | Trusted tenant identity header |
 | `userHeader` | `x-dsh-user-id` | Trusted user identity header |
@@ -109,22 +114,40 @@ A later Profile patch replaces the bundle row's complete `config`; include every
 | `maxRunEventBytes` | `2097152` | Maximum retained event bytes per run |
 | `maxRunsPerThread` | `32` | Maximum retained run ledger entries per thread |
 
+`agentPreset` composes each thread's agent from the host's agent-presets roster (mount the roster plugin before this Gateway); an unresolvable id fails Gateway activation loudly, a per-tenant entry overrides the deployment default for that tenant's threads, and a resumed thread keeps the composition its own durable session recorded. Without `agentPreset`, threads keep the host composition unchanged.
+
 `maxRunEvents` must retain at least the mandatory opening and terminal events. `maxRunEventBytes` bounds the complete retained Run record, including `RUN_STARTED` and its terminal event, and must be large enough for the configured maximum identity length. A non-loopback DSH WebServer requires `allowNonLoopback: true`. Prefer a loopback Gateway behind a same-host authenticated BFF.
 
 ## Architecture
 
+One projection core, two supported shapes. The core is the `dsh-ag-ui` Host service: it binds AG-UI threads to DSH Agents and translates runs, events, tools, shared state, and presenter cards in both directions. Everything around it is packaging.
+
 ```text
-Browser
-  -> authenticated application BFF
-  -> POST /ag-ui with Bearer secret and trusted identity headers
-  -> dsh-ag-ui Host Service
-  -> DSH Agent / Session / Tool runtime
-  -> model provider and backend Tools
+Deployment form — BFF Gateway            Embedding form — dsh-ag-ui-adapter
+
+Browser                                   Node.js application
+  -> authenticated application BFF         -> DshAgent (an AG-UI AbstractAgent)
+       bearer secret and trusted                spawns a private micro-host child:
+       identity headers                         - loopback webserver, ephemeral port
+  -> POST /ag-ui on the Host                    - the same published dsh-ag-ui
+  -> dsh-ag-ui Host Service                       gateway row, per-process secret
+  -> DSH Agent / Session / Tool runtime         - the application's spine and
+  -> model provider and backend Tools              model plugin rows
+                                             -> run() over loopback HTTP to the
+                                                same gateway service
 ```
 
-The Gateway binding key is the exact `(tenantId, userId, threadId)` tuple. A browser-supplied identity, permission, patient ID, resource ID, `context`, or `forwardedProps` value never grants backend authority.
+The deployment form fronts a shared Host with an authenticated BFF for browser clients. The embedding form ([`dsh-ag-ui-adapter`](packages/dsh-ag-ui-adapter)) composes a throwaway Host per application process — nothing is spawned before the first run, and the child never outlives the process. Both shapes speak the same protocol to the same projection core, so run semantics, browser Tools, shared state, presenter cards, idempotency, and disposal behave identically.
 
-Backend Tools can derive the authenticated thread identity from the Agent:
+In both forms the gateway binding key is the exact `(tenantId, userId, threadId)` tuple supplied through trusted identity headers.
+
+## Trust posture
+
+- The gateway listens on the Host webserver. Keep that webserver loopback and behind a same-host authenticated BFF; a non-loopback bind requires the explicit `allowNonLoopback` setting and is almost always a mistake.
+- The bearer secret authenticates **one service-to-service hop** — the BFF (or, in the embedding form, the adapter process) to the gateway. It is not end-user authentication: the gateway never sees a user credential and by itself grants nothing user-scoped.
+- End-user identity travels in the trusted `tenantHeader`/`userHeader` headers. Whoever holds the secret can assert any identity, so the secret holder must itself be trustworthy — in the deployment form, authenticating the user before injecting those headers is the BFF's whole job; in the embedding form the adapter process is the trusted principal.
+- Browser-supplied identity, permission, patient ID, resource ID, `context`, `state`, `forwardedProps`, Tool schemas, and IDs inside messages are untrusted wire input and never grant backend authority.
+- Backend Tools can derive the authenticated thread identity from the Agent:
 
 ```ts
 const identity = ctx.agUi.identityFor(exec.agent)
@@ -166,12 +189,16 @@ app.post('/api/agent', async (c) => {
 
 The BFF owns login, sessions, CSRF protection, tenant policy, resource authorization, audit, and rate limits. Do not treat the Gateway bearer secret as end-user authentication.
 
+### Proxying Host service-plugin remotes
+
+The AG-UI gateway is one Host-plane service with an HTTP remote; other DSH service plugins can mount routes on the same loopback webserver. The same rule covers every one of them: the browser never reaches the Host directly. Expose each remote through the application backend under an application-owned route, with the authenticate → authorize → forward shape above and the credentials that service expects. The Host port itself stays loopback and unadvertised to clients.
+
 ## Browser client
 
-Install the pinned official client in the frontend application:
+Install the official client in the frontend application. Any release in the supported protocol range (`>=0.0.58 <0.1.0`) works; the gateway never requires an exact client pin:
 
 ```bash
-pnpm add @ag-ui/client@0.0.58
+pnpm add @ag-ui/client
 ```
 
 Send page-specific browser Tools and current context on every run:
@@ -242,6 +269,21 @@ Shared state is model/UI collaboration data. It never grants backend authority a
 
 The package ships the framework-free BFF plugin as `dsh-ag-ui/dojo-host`. The keyless scripted model, launcher, and five-feature suite remain source-checkout fixtures. See [examples/dojo/README.md](examples/dojo/README.md) for commands, routes, upstream Dojo compatibility, real-model configuration, and security limitations.
 
+The upstream Dojo integration registry is static and has no `deepseek-harness` entry yet, so local upstream testing temporarily reuses the Claude Agent SDK TypeScript menu entry purely as a URL/path alias. The alias disappears once the upstream integration PR registering a DeepSeek Harness entry is accepted; no Claude runtime, model, or credential is involved.
+
+The recording below shows the shared-state feature on the upstream Dojo demo viewer against this repository's keyless fixture. Both chat turns flow through the gateway: the first reads the shared state, the second emits `STATE_SNAPSHOT` events that rewrite the recipe form. Playback is sped up 3x and carries English captions.
+
+<video controls muted playsinline width="800">
+  <source src="docs/demo/dojo-shared-state.mp4" type="video/mp4" />
+  <track src="docs/demo/dojo-shared-state.vtt" kind="captions" srclang="en" label="English" default />
+</video>
+
+If the inline player does not render on this host, download [docs/demo/dojo-shared-state.mp4](docs/demo/dojo-shared-state.mp4) (captions: [docs/demo/dojo-shared-state.vtt](docs/demo/dojo-shared-state.vtt)).
+
+## Embedded adapter
+
+The separate [`dsh-ag-ui-adapter`](packages/dsh-ag-ui-adapter) package is the embedded counterpart of this deployment-form Gateway. A `DshAgent` (`AbstractAgent` subclass) spawns a DSH micro-host child — a Cordis overlay composing the loopback webserver on an ephemeral port, this Gateway with a per-process generated secret, and the caller's agent-spine and model rows — and passes `run()` through loopback HTTP using the official client primitives, adding no protocol translation code. The host starts lazily on the first run, can idle-shut-down, and never outlives the embedding process. See its README for usage, plugin row resolution, environment fallback, lifecycle, and the trust posture of the embedded shape.
+
 ## HTTP and run semantics
 
 - Requests must be `POST application/json` and match AG-UI `RunAgentInput`.
@@ -266,17 +308,39 @@ This conservative subset follows common model-provider function-name limits; AG-
 
 Backend Tool results are emitted as `TOOL_CALL_RESULT`. Frontend Tool results are not echoed on the AG-UI wire because the browser already added the ToolMessage; DSH still records the real durable `tool/result`.
 
+## Tool view cards
+
+Every backend Tool call carries its DSH render-intent card next to the standard tool events, as a CUSTOM event named `dsh:tool:view`:
+
+```json
+{
+  "version": 1,
+  "callId": "call-42",
+  "toolName": "read_file",
+  "phase": "call",
+  "card": { "card": "generic", "title": "Reading src/index.ts", "kind": "read" }
+}
+```
+
+- The Gateway resolves the Tool definition in the Agent scope that executed the call, then evaluates its `presentCall` (pending state, emitted after `TOOL_CALL_END`) and `presentResult` (completed state, emitted after `TOOL_CALL_RESULT`) intents. Both are pure functions of the arguments and the durable result, including the presentation metadata the Tool's `output.presentationMeta` projected into its session log.
+- A Tool without intents, a returning intent, or a throwing intent soft-falls to the generic card: `{ "card": "generic", "title": "<toolName>", "rawInput": <args> }` for the pending state and `{ "card": "generic" }` (keep the pending title, render the raw result) for the completed state.
+- The card vocabulary is DSH's provider-neutral `ToolCallView`/`ToolResultView` union (`generic`, `terminal`, `diff`, `search`, `read`, `web` cards), so a UI renders cards without special-casing Tool names.
+- The reserved `ag_ui_update_state` Tool and client-provided frontend Tools are excluded: the state Tool projects through `STATE_SNAPSHOT`, and the client already knows how to present its own Tools.
+- At each run start, the Gateway re-derives the settled cards of the whole transcript from the durable session log — the same evaluator and inputs as the live path — and emits them right after `MESSAGES_SNAPSHOT`, so a client that missed the live stream renders identical cards. A cold read only re-derives cards for Tools that still resolve in the thread's scope, so a crash-materialized frontend Tool call after a restart stays cardless. Cards count against the per-run event budget.
+
+The separate [`dsh-ag-ui-cards`](packages/dsh-ag-ui-cards) React package renders every card kind from these envelopes with no DSH runtime dependency, and documents the event-wiring recipe. Its component tests render events recorded from this Gateway, and the recording scenario stays guarded by this package's test suite.
+
 ## Lifecycle
 
 All effects belong to the Cordis plugin fiber. Route removal, idle expiry, timeout, and plugin disposal unregister browser Tools, reject pending calls, cancel active work, dispose Agent handles, and wait for quiescence.
 
-An unexpected HTTP disconnect cancels the Gateway-owned DSH turn. `HttpAgent@0.0.58` does not implement partial SSE reconnect. A frontend Tool handoff is an intentional completed run and does not cancel the parked turn.
+An unexpected HTTP disconnect cancels the Gateway-owned DSH turn. `HttpAgent` does not implement partial SSE reconnect. A frontend Tool handoff is an intentional completed run and does not cancel the parked turn.
 
 ## Compatibility
 
 | Component | Supported version |
 | --- | --- |
-| AG-UI core/client/encoder | `0.0.58` |
+| AG-UI core/client/encoder | `>=0.0.58 <0.1.0` (`~0.0.58`; tested with `0.0.58`) |
 | Node.js | `^22.19.0` or `>=24.0.0` |
 | DeepSeek Harness | Developer preview packages listed in `peerDependencies` |
 
@@ -343,10 +407,10 @@ git clone https://github.com/CaiZongyuan/dsh-ag-ui.git
 cd dsh-ag-ui
 corepack enable
 pnpm install
-pnpm check
+pnpm -r --workspace-root check
 ```
 
-`pnpm check` runs lint, strict TypeScript checking, per-file coverage, runtime/type builds, and publint. The Dojo fixture is intentionally source-checkout-only and is not included in the npm tarball.
+The repository is a pnpm workspace: the root package is the Gateway, and `packages/` holds the `dsh-ag-ui-cards` React card renderers and the `dsh-ag-ui-adapter` embedding adapter. `pnpm -r --workspace-root check` runs lint, strict TypeScript checking, per-file coverage, runtime/type builds, and publint in every workspace project. The Dojo fixture is intentionally source-checkout-only and is not included in the npm tarball.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution and release requirements.
 

@@ -1,0 +1,6 @@
+This package spawns and composes published DeepSeek Harness packages
+(@deepseek-ai/cordis, the Cordis loader and include plugins, and the DSH
+webserver) and the published dsh-ag-ui gateway; it contains no code adapted
+from DeepSeek Harness.
+
+The remaining source is Copyright (c) 2026 Cai Zongyuan, MIT licensed.

@@ -8,8 +8,7 @@ import {
   type UserMessage as AgUiUserMessage,
 } from '@ag-ui/core'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
-import { createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
-import type { ContentBlock, ToolResultBlock } from '@deepseek-ai/dsh-llm'
+import { CallId, createUserMessage, errorChain, freezeMessage, MessageId } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import {
   assertObjectJsonSchema,
@@ -18,20 +17,30 @@ import {
   type ToolDefinition,
   type ToolRunContext,
 } from '@deepseek-ai/dsh-tools'
-import { randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import { AgUiGatewayError } from './errors.ts'
 import { jsonBytes, valueDigest } from './json.ts'
+import { durableUserId, SessionProjection, STATE_TOOL_NAME } from './projection.ts'
+import { agentPresetsOf, sessionPresetOf } from './presets.ts'
 import { RunController, type RunRecord } from './run.ts'
+import type { ToolPresenter } from './tool-view.ts'
 import type { AgUiPrincipal, AgUiThreadIdentity } from './types.ts'
 
 const FRONTEND_TOOL_NAME = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/
-const STATE_TOOL_NAME = 'ag_ui_update_state'
+
+/** Fixed identity for registry scheduling probes that never dispatch. */
+const SCHEDULING_PROBE = {
+  callId: CallId('ag-ui-scheduling-probe'),
+  arguments: {},
+  signal: new AbortController().signal,
+}
 
 /** Runtime limits and model route resolved from Gateway config. */
 export interface ThreadOptions {
   readonly provider: string
   readonly model: string
+  /** Preset id composed into the thread's agents; absent keeps the host composition. */
+  readonly presetId?: string
   readonly frontendToolTimeoutMs: number
   readonly threadIdleMs: number
   readonly maxRunEvents: number
@@ -56,22 +65,6 @@ interface PendingFrontendCall {
   reject(error: Error): void
 }
 
-interface ToolCallPosition {
-  readonly turn: number
-  readonly step: number
-  readonly name: string
-}
-
-type ToolCallLifecycle =
-  | ({ readonly kind: 'backend' } & ToolCallPosition)
-  | ({ readonly kind: 'frontend'; readonly parked: true } & ToolCallPosition)
-  | ({ readonly kind: 'state'; commit?: PendingStateCommit } & ToolCallPosition)
-
-interface TextProjection {
-  readonly messageId: string
-  started: boolean
-}
-
 interface PreparedFrontendTool {
   readonly tool: AgUiTool
   readonly fingerprint: string
@@ -83,33 +76,35 @@ interface SharedStateBaseline {
   readonly value: unknown
 }
 
-interface PendingStateCommit {
-  readonly value: unknown
-  readonly changed: boolean
-}
-
 /** One authenticated process-local AG-UI thread and its owned DSH Agent. */
 export class ThreadBinding {
-  /** Random DSH Agent and Session identity, never derived from a client thread id. */
-  readonly sessionId = SessionId(`ag-ui-${randomUUID()}`)
+  /** Deterministic durable DSH session identity, derived from the authenticated thread tuple. */
+  readonly sessionId: SessionId
   /** Authenticated principal and client thread tuple owning this binding. */
   readonly identity: AgUiThreadIdentity
+  /** Pure session-event to wire-event translation owned by this thread. */
+  private readonly projection: SessionProjection
+  /** Presenter seam: definitions resolve in the owning Agent's scope; client Tools present themselves. */
+  private readonly presenter: ToolPresenter = {
+    resolve: (name) => this.ctx.tools.get(name, this.liveAgent),
+    isFrontendTool: (name) => this.frontendTools.has(name),
+  }
+  /** Whether an announced Tool would still start while a parked call holds the pool. */
+  private readonly startsWhileParked = (name: string): boolean =>
+    this.ctx.tools.executionMode({ ...SCHEDULING_PROBE, name, agent: this.liveAgent }).kind === 'parallel'
 
   private handle: AgentHandle | undefined
   private agent: Agent | undefined
   private disposed = false
+  private interrupted = false
   private activeRun: RunController | undefined
   private idleTimer: ReturnType<typeof setTimeout> | undefined
   private readonly acceptedMessages = new Map<string, AcceptedMessage>()
   private readonly frontendTools = new Map<string, FrontendToolRegistration>()
   private stagedTools: AgUiTool[] | undefined
   private readonly pendingCalls = new Map<string, PendingFrontendCall>()
-  private readonly serverResultCallIds = new Set<string>()
   private readonly runLedger = new Map<string, RunRecord>()
-  private readonly toolCallLifecycles = new Map<string, ToolCallLifecycle>()
-  private readonly frontendSteps = new Set<string>()
-  private readonly text = new Map<string, TextProjection>()
-  private sharedState: unknown
+  private readonly userMessageIds = new Map<string, string>()
   private sharedStateActive = false
   private stateToolDispose: (() => void) | undefined
 
@@ -117,40 +112,85 @@ export class ThreadBinding {
     private readonly ctx: Context,
     principal: AgUiPrincipal,
     threadId: string,
+    sessionId: SessionId,
     private readonly options: ThreadOptions,
     private readonly onExpired: (binding: ThreadBinding) => void,
   ) {
     this.identity = { principal, threadId }
+    this.sessionId = sessionId
+    this.projection = new SessionProjection(sessionId, this.presenter)
   }
 
-  /** Create the Agent and install scoped listeners before publication. */
+  /** Create the Agent — resuming a persisted session when the host configured one — and install scoped listeners before publication. */
   async initialize(): Promise<void> {
-    const handle = await this.ctx.agents.create({
-      sessionId: this.sessionId,
-      agentOptions: { provider: this.options.provider, model: this.options.model },
-      setup: (agentCtx) => {
-        const agent = agentCtx.agent
-        /* v8 ignore next -- AgentRegistry setup always carries its unpublished Agent association. */
-        if (agent === undefined) throw new Error('ag-ui: unpublished Agent context has no Agent association')
-        this.agent = agent
-        agentCtx.on('session/event', (session, event) => {
-          /* v8 ignore next -- the Agent-scoped listener receives only its exact owned Session. */
-          if (session === agent.session) this.onSessionEvent(event)
-        })
-        agentCtx.on('agent/inbox/claimed', ({ agent: subject, message, turn }) => {
-          const active = this.activeRun
-          if (subject === agent && active?.messageId === String(message.id)) active.turn = turn
-        })
-        agentCtx.on('agent/error', ({ agent: subject, error }) => {
-          /* v8 ignore next -- scope-filtered Agent errors carry this exact Agent. */
-          if (subject === agent) this.onAgentError(error)
-        })
-        agentCtx.on('tools/change', () => { this.checkGlobalCollisions() })
-      },
-    })
+    const handle = await this.restoreOrCreate()
     this.handle = handle
     this.agent = handle.agent
     this.scheduleIdleExpiry()
+  }
+
+  private async restoreOrCreate(): Promise<AgentHandle> {
+    const agentOptions = { provider: this.options.provider, model: this.options.model }
+    // the resolved preset is snapshotted into durable meta at creation, before any await
+    const meta = this.options.presetId === undefined ? {} : { meta: { agentPreset: this.options.presetId } }
+    const create = () => this.ctx.agents.create({ sessionId: this.sessionId, ...meta, agentOptions, setup: this.agentSetup() })
+    const persistence = sessionPersistenceOf(this.ctx)
+    if (persistence === undefined) return create()
+    try {
+      const handle = await this.ctx.agents.resume({ resumeSessionId: this.sessionId, agentOptions, setup: this.agentSetup() })
+      this.recover(handle.agent.session.events)
+      return handle
+    } catch (error) {
+      // only a genuinely absent artifact falls back to first creation; a present one keeps its failure loud
+      if ((await persistence.list()).some(header => header.id === this.sessionId)) throw error
+      return create()
+    }
+  }
+
+  private agentSetup(): (agentCtx: Context) => Promise<void> {
+    return async (agentCtx) => {
+      const agent = agentCtx.agent
+      /* v8 ignore next -- AgentRegistry setup always carries its unpublished Agent association. */
+      if (agent === undefined) throw new Error('ag-ui: unpublished Agent context has no Agent association')
+      this.agent = agent
+      agentCtx.on('session/event', (session, event) => {
+        /* v8 ignore next -- the Agent-scoped listener receives only its exact owned Session. */
+        if (session === agent.session) this.onSessionEvent(event)
+      })
+      agentCtx.on('agent/inbox/claimed', ({ agent: subject, message, turn }) => {
+        const active = this.activeRun
+        if (subject === agent && active?.messageId === String(message.id)) active.turn = turn
+      })
+      agentCtx.on('agent/error', ({ agent: subject, error }) => {
+        /* v8 ignore next -- scope-filtered Agent errors carry this exact Agent. */
+        if (subject === agent) this.onAgentError(error)
+      })
+      agentCtx.on('tools/change', () => { this.checkGlobalCollisions() })
+      // mounting inside the setup window rolls a broken preset back with the whole creation
+      await this.mountPreset(agentCtx, agent)
+    }
+  }
+
+  /** Compose the agent from its preset; a thread resumes the composition its own log recorded. */
+  private async mountPreset(agentCtx: Context, agent: Agent): Promise<void> {
+    const presets = agentPresetsOf(this.ctx)
+    if (presets === undefined) {
+      if (this.options.presetId === undefined) return
+      // a roster that vanished after activation stays loud instead of composing from host tools
+      throw new Error('ag-ui: the configured agent preset cannot mount because no agent-presets roster is active')
+    }
+    const presetId = sessionPresetOf(agent.session) ?? this.options.presetId
+    if (presetId !== undefined) await presets.mount(agentCtx, presetId)
+  }
+
+  /** Rebuild idempotency bookkeeping from one recovered durable log. */
+  private recover(events: readonly SessionEvent[]): void {
+    const recovery = this.projection.recoverFrom(events)
+    for (const user of recovery.users) {
+      this.userMessageIds.set(durableUserId(user.clientId), user.clientId)
+      this.acceptedMessages.set(user.clientId, { role: 'user', digest: messageDigest(user.clientId, user.content) })
+    }
+    this.interrupted = recovery.interrupted
   }
 
   /** The live Agent after successful initialization. */
@@ -221,6 +261,20 @@ export class ThreadBinding {
   drive(controller: RunController): void {
     if (this.activeRun !== controller) throw new AgUiGatewayError('RUN_NOT_ACTIVE', 'The AG-UI run lost its reservation.', 409)
     controller.start()
+    controller.emit({
+      type: EventType.MESSAGES_SNAPSHOT,
+      messages: this.projection.messagesSnapshot(this.liveAgent.session.events, id => this.userMessageIds.get(id)),
+    })
+    // the transcript's settled cards ride beside the snapshot, re-derived from the same durable log
+    for (const view of this.projection.toolViewEvents(this.liveAgent.session.events)) controller.emit(view)
+    // a snapshot that overflowed the run budget already settled the run
+    if (controller.record.state !== 'active') return
+    // a restarted thread reports its interrupted turn once so the client can drop parked calls
+    if (this.interrupted) {
+      this.interrupted = false
+      controller.error('THREAD_INTERRUPTED', 'The AG-UI thread was interrupted by a restart; its pending frontend Tool calls are closed.')
+      return
+    }
     try {
       const admission = this.classifyMessages(controller.input.messages)
       if (admission.kind === 'user') {
@@ -232,15 +286,19 @@ export class ThreadBinding {
         this.applyFrontendTools(controller.input.tools)
         this.injectContext(controller.input, baseline)
         this.commitSharedStateBaseline(baseline)
-        const message = createUserMessage({
+        // the client's message id is preserved as the durable id, so a cold resume recovers the mapping
+        const message = freezeMessage({
+          id: MessageId(durableUserId(admission.message.id)),
+          role: 'user',
           content: [{ type: 'text', text: admission.message.content }],
           source: { kind: 'user' },
         })
         this.acceptedMessages.set(admission.message.id, {
           role: 'user',
-          digest: valueDigest(admission.message),
+          digest: messageDigest(admission.message.id, admission.message.content),
         })
         controller.messageId = String(message.id)
+        this.userMessageIds.set(String(message.id), admission.message.id)
         this.liveAgent.followup(message)
         return
       }
@@ -259,9 +317,12 @@ export class ThreadBinding {
           throw new AgUiGatewayError('UNKNOWN_TOOL_RESULT', 'The frontend Tool result has no pending call.', 409)
         }
         this.acceptedMessages.set(message.id, { role: 'tool', digest: valueDigest(message) })
+        this.projection.markAwaitingResult(message.toolCallId)
         if (message.error === undefined) pending.resolve(message.content)
         else pending.reject(new Error(`Frontend Tool failed: ${message.error}`))
       }
+      // a partial resolution leaves calls parked; finish so the client can answer the rest
+      if (this.pendingCalls.size !== 0) controller.success()
     } catch (error) {
       const failure = error instanceof AgUiGatewayError ? error : new AgUiGatewayError('AGENT_EXECUTION_ERROR', 'The AG-UI run could not start.', 500, error)
       controller.error(failure.code, failure.message)
@@ -295,9 +356,8 @@ export class ThreadBinding {
     this.pendingCalls.clear()
     this.stateToolDispose?.()
     this.stateToolDispose = undefined
-    this.sharedState = undefined
+    this.projection.sharedState = undefined
     this.sharedStateActive = false
-    this.toolCallLifecycles.clear()
     for (const registration of this.frontendTools.values()) registration.dispose()
     this.frontendTools.clear()
     const handle = this.handle
@@ -329,7 +389,7 @@ export class ThreadBinding {
       }
       if (message.role === 'tool') {
         if (this.pendingCalls.has(message.toolCallId)) tools.push(message)
-        else if (this.serverResultCallIds.delete(message.toolCallId)) {
+        else if (this.projection.consumeServerResult(message.toolCallId)) {
           this.acceptedMessages.set(message.id, { role: 'tool', digest })
         } else {
           throw new AgUiGatewayError('UNKNOWN_TOOL_RESULT', 'The Tool result has no pending or completed server call.', 409)
@@ -386,7 +446,7 @@ export class ThreadBinding {
       && (input.state === undefined || input.state === null || isEmptyStateContainer(input.state))) {
       return { active: false, value: undefined }
     }
-    const value = input.state === undefined ? this.sharedState : structuredClone(input.state)
+    const value = input.state === undefined ? this.projection.sharedState : structuredClone(input.state)
     if (jsonBytes(value, 'state') > this.options.maxStateBytes) {
       throw new AgUiGatewayError('STATE_LIMIT_EXCEEDED', 'state exceeds its limit.', 413)
     }
@@ -418,7 +478,7 @@ export class ThreadBinding {
     /* v8 ignore next -- run admission owns the active controller through baseline commit. */
     if (active === undefined) throw new Error('Shared state has no active AG-UI run')
     this.ensureStateTool()
-    this.sharedState = structuredClone(baseline.value)
+    this.projection.sharedState = structuredClone(baseline.value)
     this.sharedStateActive = true
     active.emit({ type: EventType.STATE_SNAPSHOT, snapshot: structuredClone(baseline.value) })
   }
@@ -443,6 +503,7 @@ export class ThreadBinding {
         },
       },
       presentCall: args => ({ card: 'generic', title: 'Update shared state', rawInput: args }),
+      isConcurrencySafe: () => true,
       execute: (args, exec) => Promise.resolve(this.prepareSharedStateUpdate(args, exec)),
     }
     this.stateToolDispose = this.liveAgent.ctx.tools.register(definition)
@@ -451,11 +512,11 @@ export class ThreadBinding {
   private prepareSharedStateUpdate(args: unknown, exec: ToolRunContext): string {
     if (!this.sharedStateActive) throw new Error('Shared state is not active for this AG-UI thread')
     const callId = String(exec.callId)
-    const lifecycle = this.toolCallLifecycles.get(callId)
+    const lifecycle = this.projection.lifecycleOf(callId)
     if (lifecycle?.kind !== 'state') throw new Error('Shared-state update has no DSH call position')
     if (lifecycle.commit !== undefined) throw new Error('Shared-state update is already pending')
     const updates = readStateUpdates(args)
-    const current = this.sharedState
+    const current = this.projection.sharedState
     const next = isUnknownRecord(current)
       ? { ...current, ...updates }
       : { ...updates }
@@ -469,7 +530,7 @@ export class ThreadBinding {
       if (active === undefined) throw new Error('Shared-state update has no active AG-UI run')
       active.assertCanEmit({ type: EventType.STATE_SNAPSHOT, snapshot: next })
     }
-    lifecycle.commit = { value: structuredClone(next), changed }
+    this.projection.stageCommit(callId, { value: structuredClone(next), changed })
     return JSON.stringify({ status: changed ? 'updated' : 'unchanged', state: next })
   }
 
@@ -529,6 +590,8 @@ export class ThreadBinding {
         },
       },
       presentCall: args => ({ card: 'generic', title: item.tool.description, rawInput: args }),
+      // parking holds no server-side resource, so calls of one step may overlap
+      isConcurrencySafe: () => true,
       execute: (args, exec) => this.parkFrontendTool(item.tool.name, item.schema, args, exec),
     }
   }
@@ -542,14 +605,12 @@ export class ThreadBinding {
     const violations = validateJsonSchemaValue(schema, args, '')
     if (violations.length > 0) throw new Error(`Invalid frontend Tool arguments: ${violations.join('; ')}`)
     const callId = String(exec.callId)
-    const lifecycle = this.toolCallLifecycles.get(callId)
+    const lifecycle = this.projection.lifecycleOf(callId)
     if (lifecycle?.kind !== 'backend' || lifecycle.name !== name) throw new Error('Frontend Tool call has no DSH call position')
     const active = this.activeRun
-    if (active === undefined || active.turn !== lifecycle.turn) throw new Error('Frontend Tool call has no active AG-UI run')
-    const stepKey = `${String(lifecycle.turn)}:${String(lifecycle.step)}`
-    if (this.frontendSteps.has(stepKey)) throw new Error('Only one frontend Tool call is allowed per DSH step')
-    this.frontendSteps.add(stepKey)
-    this.toolCallLifecycles.set(callId, { ...lifecycle, kind: 'frontend', parked: true })
+    // the run may already have settled once every announced call streamed
+    if (active !== undefined && active.turn !== lifecycle.turn) throw new Error('Frontend Tool call has no active AG-UI run')
+    this.projection.markParked(callId, lifecycle)
 
     const deferred = Promise.withResolvers<string>()
     let settled = false
@@ -578,130 +639,37 @@ export class ThreadBinding {
     }, this.options.frontendToolTimeoutMs)
     exec.signal.addEventListener('abort', onAbort, { once: true })
     this.pendingCalls.set(callId, pending)
-    active.success()
+    this.clearIdleExpiry()
+    if (active !== undefined
+      && this.projection.parkSettleReady(lifecycle.turn, lifecycle.step, this.startsWhileParked)) active.success()
     return deferred.promise
   }
 
   private onSessionEvent(event: SessionEvent): void {
     const active = this.activeRun
-    if (event.type === 'step/end') {
-      this.frontendSteps.delete(`${String(event.data.turn)}:${String(event.data.step)}`)
-      if (this.stagedTools !== undefined && active?.turn === event.data.turn) {
-        const staged = this.stagedTools
-        this.stagedTools = undefined
-        try {
-          this.applyFrontendTools(staged)
-        } catch (error) {
-          active.error('FRONTEND_TOOL_SYNC_FAILED', 'The frontend Tool set could not be updated.')
-          this.liveAgent.cancel({ kind: 'hook', reason: `AG-UI frontend Tool sync failed: ${errorChain(error)}` })
-        }
+    const step = this.projection.project(event, active?.turn)
+    if (event.type === 'step/end' && this.stagedTools !== undefined && active?.turn === event.data.turn) {
+      const staged = this.stagedTools
+      this.stagedTools = undefined
+      try {
+        this.applyFrontendTools(staged)
+      } catch (error) {
+        active.error('FRONTEND_TOOL_SYNC_FAILED', 'The frontend Tool set could not be updated.')
+        this.liveAgent.cancel({ kind: 'hook', reason: `AG-UI frontend Tool sync failed: ${errorChain(error)}` })
       }
     }
-    if (active === undefined || active.turn === undefined || !eventBelongsToTurn(event, active.turn)) return
-
-    switch (event.type) {
-      case 'assistant/chunk': {
-        if (event.data.chunk.type !== 'text-delta') break
-        const projection = this.textProjection(event.data.turn, event.data.step)
-        if (!projection.started) {
-          projection.started = true
-          active.emit({ type: EventType.TEXT_MESSAGE_START, messageId: projection.messageId, role: 'assistant' })
-        }
-        active.emit({ type: EventType.TEXT_MESSAGE_CONTENT, messageId: projection.messageId, delta: event.data.chunk.text })
-        break
-      }
-      case 'assistant/message': {
-        const projection = this.textProjection(event.data.turn, event.data.step)
-        if (!projection.started) {
-          const text = event.data.message.content
-            .filter((block): block is Extract<ContentBlock, { type: 'text' }> => block.type === 'text')
-            .map(block => block.text)
-            .join('')
-          if (text !== '') {
-            active.emit({ type: EventType.TEXT_MESSAGE_START, messageId: projection.messageId, role: 'assistant' })
-            active.emit({ type: EventType.TEXT_MESSAGE_CONTENT, messageId: projection.messageId, delta: text })
-            projection.started = true
-          }
-        }
-        if (projection.started) active.emit({ type: EventType.TEXT_MESSAGE_END, messageId: projection.messageId })
-        break
-      }
-      case 'tool/call': {
-        const callId = String(event.data.callId)
-        this.toolCallLifecycles.set(callId, {
-          kind: event.data.name === STATE_TOOL_NAME ? 'state' : 'backend',
-          turn: event.data.turn,
-          step: event.data.step,
-          name: event.data.name,
-        })
-        if (event.data.name === STATE_TOOL_NAME) break
-        active.emit({
-          type: EventType.TOOL_CALL_START,
-          toolCallId: callId,
-          toolCallName: event.data.name,
-          parentMessageId: assistantMessageId(this.sessionId, event.data.turn, event.data.step),
-        })
-        active.emit({ type: EventType.TOOL_CALL_ARGS, toolCallId: callId, delta: event.data.arguments })
-        active.emit({ type: EventType.TOOL_CALL_END, toolCallId: callId })
-        break
-      }
-      case 'tool/result': {
-        const block = event.data.message.content[0]
-        const callId = String(block.toolCallId)
-        const lifecycle = this.toolCallLifecycles.get(callId)
-        this.toolCallLifecycles.delete(callId)
-        if (lifecycle?.kind === 'state') {
-          const commit = lifecycle.commit
-          if (commit !== undefined && !block.isError && commit.changed) {
-            this.sharedState = structuredClone(commit.value)
-            active.emit({ type: EventType.STATE_SNAPSHOT, snapshot: structuredClone(commit.value) })
-          }
-          break
-        }
-        if (lifecycle?.kind !== 'frontend') {
-          this.serverResultCallIds.add(callId)
-          active.emit({
-            type: EventType.TOOL_CALL_RESULT,
-            messageId: `ag-ui:${String(this.sessionId)}:${callId}:result`,
-            toolCallId: callId,
-            content: renderToolResult(block),
-            role: 'tool',
-          })
-        }
-        break
-      }
-      case 'turn/end': {
-        this.clearToolCallsForTurn(event.data.turn)
-        switch (event.data.reason.kind) {
-          case 'completed':
-          case 'max-tokens':
-            active.success()
-            break
-          case 'error':
-            active.error(event.data.reason.error.code, event.data.reason.error.message)
-            break
-          case 'aborted':
-            active.error('AGENT_ABORTED', 'The DSH turn was aborted.')
-            break
-          case 'blocked':
-            active.error('AGENT_BLOCKED', 'The DSH turn was blocked before completion.')
-            break
-          case 'interrupted':
-            active.error('AGENT_INTERRUPTED', 'The stored DSH turn was interrupted.')
-            break
-          default:
-            active.error('AGENT_EXECUTION_ERROR', 'The DSH turn ended with an unsupported reason.')
-        }
-        break
-      }
-      default:
-        break
+    if (active === undefined || active.turn === undefined) return
+    if (step.outcome !== undefined) {
+      if (step.outcome.kind === 'success') active.success()
+      else active.error(step.outcome.code, step.outcome.message)
+      return
     }
-  }
-
-  private clearToolCallsForTurn(turn: number): void {
-    for (const [callId, lifecycle] of this.toolCallLifecycles) {
-      if (lifecycle.turn === turn) this.toolCallLifecycles.delete(callId)
+    for (const wireEvent of step.events) active.emit(wireEvent)
+    // a server call completing the announced set settles a run parked earlier;
+    // a frontend call settles at its own park instead
+    if (event.type === 'tool/call'
+      && this.projection.parkSettleReady(event.data.turn, event.data.step, this.startsWhileParked)) {
+      active.success()
     }
   }
 
@@ -709,16 +677,6 @@ export class ThreadBinding {
     const active = this.activeRun
     if (active === undefined || active.record.state !== 'active') return
     active.error('AGENT_EXECUTION_ERROR', errorChain(error))
-  }
-
-  private textProjection(turn: number, step: number): TextProjection {
-    const key = `${String(turn)}:${String(step)}`
-    let projection = this.text.get(key)
-    if (projection === undefined) {
-      projection = { messageId: assistantMessageId(this.sessionId, turn, step), started: false }
-      this.text.set(key, projection)
-    }
-    return projection
   }
 
   private checkGlobalCollisions(): void {
@@ -770,6 +728,21 @@ function isEmptyStateContainer(value: unknown): boolean {
   return isUnknownRecord(value) && Object.keys(value).length === 0
 }
 
+/** Digest one accepted user message in a fixed field order, stable across cold resume. */
+function messageDigest(clientId: string, content: string): string {
+  return valueDigest({ id: clientId, role: 'user', content })
+}
+
+/** Optional durable persistence service, when the host configured a backend. */
+interface SessionPersistenceLike {
+  list(signal?: AbortSignal): Promise<ReadonlyArray<{ readonly id: SessionId }>>
+}
+
+/** Resolve the host's session persistence backend without requiring one. */
+function sessionPersistenceOf(ctx: Context): SessionPersistenceLike | undefined {
+  return (ctx as Context & { get(name: string): unknown }).get('sessionPersistence') as SessionPersistenceLike | undefined
+}
+
 /** Narrow a JSON object without accepting arrays or null. */
 function isUnknownRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -781,28 +754,4 @@ function readStateUpdates(args: unknown): Record<string, unknown> {
     throw new Error('Shared-state updates must contain a state_updates object')
   }
   return structuredClone(args.state_updates)
-}
-
-/** Whether a durable event carries the selected turn. */
-function eventBelongsToTurn(event: SessionEvent, turn: number): boolean {
-  if (!('turn' in event.data)) return false
-  return event.data.turn === turn
-}
-
-/** Deterministic AG-UI assistant message identity for one DSH step. */
-function assistantMessageId(sessionId: SessionId, turn: number, step: number): string {
-  return `ag-ui:${String(sessionId)}:${String(turn)}:${String(step)}:assistant`
-}
-
-/** Flatten DSH model-facing Tool content into the AG-UI string result field. */
-function renderToolResult(block: ToolResultBlock): string {
-  const text: string[] = []
-  for (const content of block.content) {
-    if (content.type === 'text') text.push(content.text)
-    else if (content.type === 'reasoning') text.push(content.text)
-    else if (content.type === 'image') text.push('[image result]')
-    else if (content.type === 'tool-call') text.push(`[nested tool call: ${content.name}]`)
-    else text.push(renderToolResult(content))
-  }
-  return text.join('\n')
 }

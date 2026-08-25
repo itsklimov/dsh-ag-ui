@@ -6,7 +6,7 @@
 [![npm version](https://img.shields.io/npm/v/dsh-ag-ui.svg)](https://www.npmjs.com/package/dsh-ag-ui)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-一个社区维护的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Host 插件，通过 [AG-UI protocol](https://github.com/ag-ui-protocol/ag-ui) 暴露 DSH Agent。它提供经过认证的 HTTP/SSE Gateway、AG-UI thread 到 DSH Agent 的绑定、流式文本和 Tool event、浏览器持有的 Tools，以及浏览器返回 Tool result 后继续同一个 DSH turn 的能力。
+一个社区维护的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Host 插件，通过 [AG-UI protocol](https://github.com/ag-ui-protocol/ag-ui) 暴露 DSH Agent。它提供经过认证的 HTTP/SSE Gateway、AG-UI thread 到 DSH Agent 的绑定、流式文本和 Tool event、浏览器持有的 Tools，以及浏览器返回 Tool result 后继续同一个 DSH turn 的能力。同一套投影核心另有一种嵌入形态：独立的 `dsh-ag-ui-adapter` 包在 AG-UI `AbstractAgent` 背后 spawn 一个私有的环回微型 Host。
 
 > 这是社区项目，不是 DeepSeek 或 AG-UI 官方 package。
 
@@ -14,13 +14,16 @@
 
 - 通过 `ctx.agUi` 暴露的标准 Cordis `Service` 插件
 - 可使用 `dsh plugin add` 安装的 DSH Profile Bundle
-- 精确锁定 AG-UI `0.0.58` protocol packages
+- 下限式 AG-UI 协议范围（`~0.0.58`）
 - 使用可信 tenant/user headers 的 BFF-to-Gateway 认证
 - `(tenantId, userId, threadId)` 到 DSH Agent 的进程内绑定
 - AG-UI 文本流与 backend Tool result 投影
 - 由 `RunAgentInput.tools` 提供的 Agent-scoped browser Tools
 - 跨 HTTP runs 的 Frontend Tool Promise park 与 ToolMessage continuation
 - 通过 `RunAgentInput.state`、`ag_ui_update_state` 和 `STATE_SNAPSHOT` 实现的双向 shared state
+- 后端 Tool 调用以带版本的 `dsh:tool:view` CUSTOM 事件携带 presenter card，live 与冷回放一致
+- 独立的 `dsh-ag-ui-cards` React 包渲染全部 card 种类，组件测试基于录制自真实 Gateway 的事件
+- 独立的 `dsh-ag-ui-adapter` 嵌入适配包，spawn 环回 DSH 微型 Host 并以 AG-UI `AbstractAgent` 形式提供服务
 - 覆盖五项标准 AG-UI feature 的 keyless Dojo-compatible example
 - Run 和 message 幂等
 - Request、context、Tool schema、event buffer、thread 和 run ledger 上限
@@ -87,6 +90,8 @@ Bundle 插入一个 Host-plane `ag-ui` row 来加载 Gateway service。Package �
 | `path` | `/ag-ui` | 精确 Host HTTP route |
 | `provider` | 必填 | 已注册 DSH model provider route |
 | `model` | 必填 | Provider 持有的 model ID |
+| `agentPreset` | 无 | 组合进每个线程的部署级默认 agent preset id |
+| `tenantPresets` | `{}` | 按租户覆盖 `agentPreset` 的 preset id 映射 |
 | `sharedSecret` | 必填 | 仅与可信 BFF 共享的 bearer secret |
 | `tenantHeader` | `x-dsh-tenant-id` | 可信 tenant identity header |
 | `userHeader` | `x-dsh-user-id` | 可信 user identity header |
@@ -109,22 +114,40 @@ Bundle 插入一个 Host-plane `ag-ui` row 来加载 Gateway service。Package �
 | `maxRunEventBytes` | `2097152` | 每个 run 最大保留 event bytes |
 | `maxRunsPerThread` | `32` | 每个 thread 最大 run ledger entries |
 
+`agentPreset` 让每个线程的 agent 从宿主的 agent-presets roster 组合而来（需在本 Gateway 之前挂载 roster 插件）；无法解析的 id 会让 Gateway 激活响亮失败，按租户条目覆盖该租户线程的部署默认值，而恢复的线程保持其持久 session 自己记录的组合。不配置 `agentPreset` 时，线程保持宿主组合不变。
+
 `maxRunEvents` 必须至少容纳 mandatory opening 与 terminal events。`maxRunEventBytes` 会限制包含 `RUN_STARTED` 和 terminal event 在内的完整 retained Run record，并且必须足以容纳已配置的最大 identity length。非 loopback DSH WebServer 需要设置 `allowNonLoopback: true`。推荐把 Gateway 保持在 loopback，并放在同 Host 的 authenticated BFF 后面。
 
 ## 架构
 
+一套投影核心，两种支持的形态。核心是 `dsh-ag-ui` Host service：它把 AG-UI thread 绑定到 DSH Agent，并在两个方向上翻译 run、event、Tool、shared state 与 presenter card。其余一切只是包装。
+
 ```text
-Browser
-  -> authenticated application BFF
-  -> POST /ag-ui，携带 bearer secret 与可信 identity headers
-  -> dsh-ag-ui Host Service
-  -> DSH Agent / Session / Tool runtime
-  -> model provider 与 backend Tools
+部署形态 — BFF Gateway                     嵌入形态 — dsh-ag-ui-adapter
+
+Browser                                    Node.js 应用
+  -> 经过认证的应用 BFF                      -> DshAgent（AG-UI AbstractAgent）
+       bearer secret 与可信                       spawn 一个私有微型 Host 子进程：
+       identity headers                           - 环回 webserver，临时端口
+  -> POST /ag-ui 到 Host                         - 同一个已发布的 dsh-ag-ui
+  -> dsh-ag-ui Host Service                        gateway row，按进程 secret
+  -> DSH Agent / Session / Tool runtime          - 应用自己的 spine 与
+  -> model provider 与 backend Tools                model plugin rows
+                                            -> run() 经环回 HTTP 访问同一个
+                                               gateway service
 ```
 
-Gateway binding key 是精确的 `(tenantId, userId, threadId)` tuple。浏览器提供的 identity、permission、patient ID、resource ID、`context` 或 `forwardedProps` 永远不能授予 backend authority。
+部署形态用经过认证的 BFF 为浏览器客户端挡在共享 Host 之前。嵌入形态（[`dsh-ag-ui-adapter`](packages/dsh-ag-ui-adapter)）为每个应用进程组合一个一次性的 Host——首次 run 之前不 spawn 任何东西，子进程也绝不会比宿主进程活得更久。两种形态以同一协议访问同一投影核心，因此 run 语义、browser Tools、shared state、presenter card、幂等与 disposal 行为完全一致。
 
-Backend Tool 可以从 Agent 推导经过认证的 thread identity：
+两种形态下，gateway binding key 都是由可信 identity headers 提供的精确 `(tenantId, userId, threadId)` tuple。
+
+## 信任姿态
+
+- Gateway 监听在 Host webserver 上。让该 webserver 保持 loopback 并放在同 Host 的经过认证的 BFF 之后；非 loopback bind 需要显式设置 `allowNonLoopback`，而这几乎总是错误的。
+- Bearer secret 认证的是**一跳 service-to-service 通信**——BFF（嵌入形态下则是 adapter 进程）到 gateway。它不是 end-user authentication：gateway 永远看不到用户凭据，其本身也不授予任何用户级权限。
+- End-user identity 经由可信的 `tenantHeader`/`userHeader` headers 传递。持有 secret 的人可以断言任意 identity，因此 secret 持有者本身必须可信——部署形态下，注入这些 headers 之前先认证用户正是 BFF 的全部职责；嵌入形态下，adapter 进程本身就是可信主体。
+- 浏览器提供的 identity、permission、patient ID、resource ID、`context`、`state`、`forwardedProps`、Tool schema 以及 message 内的 ID 都是不可信的 wire input，永远不能授予 backend authority。
+- Backend Tool 可以从 Agent 推导经过认证的 thread identity：
 
 ```ts
 const identity = ctx.agUi.identityFor(exec.agent)
@@ -166,12 +189,16 @@ app.post('/api/agent', async (c) => {
 
 BFF 持有 login、session、CSRF、tenant policy、resource authorization、audit 和 rate limits。不要把 Gateway bearer secret 当作 end-user authentication。
 
+### 代理 Host 服务插件 remote
+
+AG-UI gateway 只是众多带 HTTP remote 的 Host-plane service 之一；其他 DSH 服务插件也可以在同一个环回 webserver 上挂载路由。同一条规则覆盖所有这些 remote：浏览器永远不直接访问 Host。每个 remote 都经应用 backend 暴露在应用自己的路由之下，采用上文"认证 → 授权 → 转发"的形态并附带该服务期望的凭据。Host 端口本身保持 loopback，也不向客户端公开。
+
 ## 浏览器客户端
 
-在 frontend application 中安装锁定版本的官方 client：
+在 frontend application 中安装官方 client。支持协议范围（`>=0.0.58 <0.1.0`）内的任意版本均可；网关不要求 client 精确锁版：
 
 ```bash
-pnpm add @ag-ui/client@0.0.58
+pnpm add @ag-ui/client
 ```
 
 在每个 run 中发送页面相关的 browser Tools 与当前 context：
@@ -242,6 +269,21 @@ Shared state 是 model/UI collaboration data。它永远不授予 backend author
 
 Package 以 `dsh-ag-ui/dojo-host` 发布 framework-free BFF plugin。Keyless scripted model、launcher 和五项 feature suite 仍是仅供 source checkout 使用的 fixtures。命令、routes、upstream Dojo 兼容方式、real-model 配置与安全限制见 [examples/dojo/README.zh.md](examples/dojo/README.zh.md)。
 
+Upstream Dojo 的 integration registry 是静态源码，目前没有 `deepseek-harness` 条目，因此本地 upstream 测试暂时复用 Claude Agent SDK TypeScript 菜单项作为纯 URL/path 别名。该别名在注册 DeepSeek Harness 条目的 upstream integration PR 被接受后即会消失；过程中不涉及任何 Claude 运行时、模型或凭据。
+
+下面的录像展示 upstream Dojo demo viewer 上的 shared-state feature 对接本仓库 keyless fixture 的效果。两轮对话都经过网关：第一轮读取共享状态，第二轮发出改写菜谱表单的 `STATE_SNAPSHOT` 事件。播放速度为 3 倍速并附英文字幕。
+
+<video controls muted playsinline width="800">
+  <source src="docs/demo/dojo-shared-state.mp4" type="video/mp4" />
+  <track src="docs/demo/dojo-shared-state.vtt" kind="captions" srclang="en" label="English" default />
+</video>
+
+若当前宿主不渲染内嵌播放器，可下载 [docs/demo/dojo-shared-state.mp4](docs/demo/dojo-shared-state.mp4)（字幕：[docs/demo/dojo-shared-state.vtt](docs/demo/dojo-shared-state.vtt)）。
+
+## 嵌入适配器
+
+独立的 [`dsh-ag-ui-adapter`](packages/dsh-ag-ui-adapter) 包是本部署形态网关的嵌入形态对应物。`DshAgent`（`AbstractAgent` 子类）spawn 一个 DSH 微型 Host 子进程——由 Cordis overlay 组合环回 webserver（临时端口）、本网关（按进程生成的 secret）以及调用方的 agent spine 与 model rows——并通过环回 HTTP 以官方 client 原语实现 `run()`，不新增任何协议翻译代码。Host 在首次 run 时才惰性启动，可按空闲窗口自动关闭，且绝不会比宿主进程活得更久。用法、plugin row 解析、环境变量回退、生命周期与嵌入形态的信任姿态见其 README。
+
 ## HTTP 与 run 语义
 
 - Request 必须为 `POST application/json`，并且符合 AG-UI `RunAgentInput`。
@@ -266,17 +308,39 @@ Browser Tool name 必须匹配：
 
 Backend Tool result 会发出 `TOOL_CALL_RESULT`。Frontend Tool result 不在 AG-UI wire 上回显，因为浏览器已经追加 ToolMessage；DSH 仍会记录真实 durable `tool/result`。
 
+## Tool view cards
+
+每个后端 Tool 调用都会在标准 tool 事件旁携带其 DSH render-intent card，即名为 `dsh:tool:view` 的 CUSTOM 事件：
+
+```json
+{
+  "version": 1,
+  "callId": "call-42",
+  "toolName": "read_file",
+  "phase": "call",
+  "card": { "card": "generic", "title": "Reading src/index.ts", "kind": "read" }
+}
+```
+
+- Gateway 在实际执行调用的 Agent scope 内解析 Tool definition，再求值其 `presentCall`（pending 状态，`TOOL_CALL_END` 之后发出）与 `presentResult`（completed 状态，`TOOL_CALL_RESULT` 之后发出）intent。二者都是入参与 durable result 的纯函数，包含该 Tool 的 `output.presentationMeta` 投影进 session log 的 presentation metadata。
+- 未声明 intent、intent 返回 undefined 或 intent 抛错的 Tool 会软回退到 generic card：pending 状态为 `{ "card": "generic", "title": "<toolName>", "rawInput": <args> }`，completed 状态为 `{ "card": "generic" }`（保留 pending 标题，直接渲染原始 result）。
+- card 词汇表是 DSH provider-neutral 的 `ToolCallView`/`ToolResultView` union（`generic`、`terminal`、`diff`、`search`、`read`、`web` card），UI 无需按 Tool 名特判即可渲染。
+- 保留 Tool `ag_ui_update_state` 与客户端提供的 frontend Tool 被排除：state Tool 经 `STATE_SNAPSHOT` 投影，客户端本来就了解如何呈现自己的 Tool。
+- 每个 run 开始时，Gateway 会从 durable session log 重新推导整个转录的已结算 card——与 live 路径使用相同的求值器与输入——并在 `MESSAGES_SNAPSHOT` 之后立即发出，因此错过 live 流的客户端也能渲染出完全一致的 card。冷读取只会为仍在该 thread scope 内可解析的 Tool 重新推导 card，因此重启后由崩溃恢复物化的 frontend Tool 调用不会带 card。card 计入 run 的事件预算。
+
+独立的 [`dsh-ag-ui-cards`](packages/dsh-ag-ui-cards) React 包基于这些 envelope 渲染全部 card 种类，不依赖任何 DSH runtime，并给出了事件接线配方。其组件测试渲染录制自本 Gateway 的事件，录制场景由本仓库的测试套件持续守护。
+
 ## 生命周期
 
 所有 effect 都属于 Cordis plugin fiber。Route removal、idle expiry、timeout 和 plugin disposal 会注销 browser Tools、拒绝 pending calls、取消 active work、dispose Agent handles，并等待完全停稳。
 
-意外 HTTP disconnect 会取消 Gateway-owned DSH turn。`HttpAgent@0.0.58` 不支持 partial SSE reconnect。Frontend Tool handoff 是 intentional completed run，不会取消 parked turn。
+意外 HTTP disconnect 会取消 Gateway-owned DSH turn。`HttpAgent` 不支持 partial SSE reconnect。Frontend Tool handoff 是 intentional completed run，不会取消 parked turn。
 
 ## 兼容性
 
 | 组件 | 支持版本 |
 | --- | --- |
-| AG-UI core/client/encoder | `0.0.58` |
+| AG-UI core/client/encoder | `>=0.0.58 <0.1.0`（`~0.0.58`；已用 `0.0.58` 验证） |
 | Node.js | `^22.19.0` 或 `>=24.0.0` |
 | DeepSeek Harness | `peerDependencies` 中列出的 developer preview packages |
 
@@ -343,10 +407,10 @@ git clone https://github.com/CaiZongyuan/dsh-ag-ui.git
 cd dsh-ag-ui
 corepack enable
 pnpm install
-pnpm check
+pnpm -r --workspace-root check
 ```
 
-`pnpm check` 会运行 lint、strict TypeScript、per-file coverage、runtime/type builds 和 publint。Dojo fixture 仅用于 source checkout，不包含在 npm tarball 中。
+本仓库是 pnpm workspace：根 package 即 Gateway，`packages/` 下是 `dsh-ag-ui-cards` React card 渲染包与 `dsh-ag-ui-adapter` 嵌入适配包。`pnpm -r --workspace-root check` 会在每个 workspace project 内运行 lint、strict TypeScript、per-file coverage、runtime/type builds 和 publint。Dojo fixture 仅用于 source checkout，不包含在 npm tarball 中。
 
 贡献和发布要求见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 

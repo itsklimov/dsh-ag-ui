@@ -6,3 +6,7 @@ coverage/
 .env.*
 !.env.example
 .DS_Store
+.claude/
+.agents/
+references/
+docs/CONTEXT.md

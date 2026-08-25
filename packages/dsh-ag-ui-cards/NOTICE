@@ -1,0 +1,7 @@
+This package renders the DSH tool view card vocabulary. The type declarations
+under src/types.ts re-declare, with original wording, the shapes DeepSeek
+Harness publishes as @deepseek-ai/dsh-tools presentation types, so that this
+renderer carries no DSH runtime dependency. DeepSeek Harness is Copyright (c)
+2026 DeepSeek, MIT licensed.
+
+The remaining source is Copyright (c) 2026 Cai Zongyuan, MIT licensed.

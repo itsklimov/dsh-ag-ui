@@ -1,11 +1,11 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { once } from 'node:events'
 import { request as httpRequest } from 'node:http'
-import { createServer } from 'node:net'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
-import { HttpAgent, type Message, type Tool, type ToolCall } from '@ag-ui/client'
-import { EventType, type BaseEvent } from '@ag-ui/core'
+import { HttpAgent, type Tool } from '@ag-ui/client'
+import { EventType } from '@ag-ui/core'
+import { ask, lastAssistantText, pendingTool, readArgs, reservePort, runAgentEvents, waitForServer } from './harness.ts'
 
 const exampleStart = fileURLToPath(new URL('../examples/dojo/start.mjs', import.meta.url))
 const children: ChildProcessWithoutNullStreams[] = []
@@ -84,7 +84,7 @@ describe('Dojo-compatible feature suite', () => {
     child.stderr.on('data', (chunk: string) => { stderr.push(chunk) })
     const base = `http://127.0.0.1:${String(port)}`
 
-    await waitForServer(`${base}/health`, child, stderr)
+    await waitForServer(`${base}/health`, child, stderr, 'Dojo example')
     const health = await fetch(`${base}/health`).then(response => response.json()) as { agents: string[] }
     expect(health.agents).toEqual([
       'agentic_chat',
@@ -235,7 +235,7 @@ async function verifyHumanInTheLoop(base: string): Promise<void> {
     toolCallId: call?.id ?? 'missing-call',
     content: JSON.stringify({ accepted: true, steps: args.steps }),
   })
-  await run(agent, 'hitl-run-2', [TASK_TOOL])
+  await runAgentEvents(agent, 'hitl-run-2', [TASK_TOOL])
   expect(lastAssistantText(agent.messages)).toBe('The approved task plan is ready.')
 }
 
@@ -254,73 +254,6 @@ async function verifyGenerativeUi(base: string): Promise<void> {
     toolCallId: call?.id ?? 'missing-call',
     content: 'Haiku generated!',
   })
-  await run(agent, 'haiku-run-2', [HAIKU_TOOL])
+  await runAgentEvents(agent, 'haiku-run-2', [HAIKU_TOOL])
   expect(lastAssistantText(agent.messages)).toBe('The haiku card is ready.')
-}
-
-async function ask(
-  agent: HttpAgent,
-  messageId: string,
-  runId: string,
-  content: string,
-  tools: Tool[],
-): Promise<BaseEvent[]> {
-  agent.addMessage({ id: messageId, role: 'user', content })
-  return run(agent, runId, tools)
-}
-
-async function run(agent: HttpAgent, runId: string, tools: Tool[]): Promise<BaseEvent[]> {
-  const events: BaseEvent[] = []
-  await agent.runAgent({ runId, tools, context: [], forwardedProps: {} }, {
-    onEvent: ({ event }) => { events.push(event) },
-  })
-  return events
-}
-
-function pendingTool(messages: Message[], name: string): ToolCall | undefined {
-  const results = new Set(messages
-    .filter((message): message is Extract<Message, { role: 'tool' }> => message.role === 'tool')
-    .map(message => message.toolCallId))
-  return messages.flatMap(message => message.role === 'assistant' ? message.toolCalls ?? [] : [])
-    .find(call => call.function.name === name && !results.has(call.id))
-}
-
-function readArgs<T>(call: ToolCall | undefined): T {
-  if (call === undefined) throw new Error('The expected frontend Tool call is missing.')
-  return JSON.parse(call.function.arguments) as T
-}
-
-function lastAssistantText(messages: Message[]): string | undefined {
-  return messages.findLast(message => message.role === 'assistant' && typeof message.content === 'string')?.content as string | undefined
-}
-
-async function reservePort(): Promise<number> {
-  const server = createServer()
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject)
-    server.listen(0, '127.0.0.1', resolve)
-  })
-  const address = server.address()
-  if (address === null || typeof address === 'string') throw new Error('Port reservation returned no TCP address.')
-  await new Promise<void>((resolve, reject) => {
-    server.close((error) => {
-      if (error === undefined) resolve()
-      else reject(error)
-    })
-  })
-  return address.port
-}
-
-async function waitForServer(url: string, child: ChildProcessWithoutNullStreams, stderr: string[]): Promise<void> {
-  for (let attempt = 0; attempt < 200; attempt += 1) {
-    if (child.exitCode !== null) throw new Error(`Dojo example exited ${String(child.exitCode)}: ${stderr.join('')}`)
-    try {
-      const response = await fetch(url)
-      if (response.ok) return
-    } catch {
-      // Connection refusal means the real WebServer has not bound yet.
-    }
-    await new Promise(resolve => setTimeout(resolve, 20))
-  }
-  throw new Error(`Dojo example did not become ready: ${stderr.join('')}`)
 }

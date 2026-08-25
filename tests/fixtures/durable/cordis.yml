@@ -1,0 +1,41 @@
+- id: webserver
+  name: '@deepseek-ai/dsh-host-webserver'
+  config:
+    host: '127.0.0.1'
+    port: !!js Number(process.env.PORT)
+
+- id: agent-spine
+  name: '@deepseek-ai/dsh-agent-spine-demo'
+  config:
+    workspaceContext: false
+    skills:
+      enabled: false
+    toolBash: false
+    toolJobs: false
+    includeHarnessIdentity: false
+    includeRuntimeContext: false
+    persona: You are the durable fixture assistant.
+
+- id: session-persistence
+  name: '@deepseek-ai/dsh-session-persistence-jsonl'
+  config:
+    root: !!js process.env.DSH_AG_UI_FIXTURE_ROOT
+    compression: 'none'
+
+- id: scripted-model
+  name: './scripted-model.mjs'
+
+- id: ag-ui
+  name: '../../../lib/index.js'
+  config:
+    provider: fixture-scripted
+    model: fixture-scripted
+    sharedSecret: !!js process.env.DSH_AG_UI_FIXTURE_SECRET
+    path: /ag-ui
+    maxRunEvents: 256
+    maxRunEventBytes: 262144
+    frontendToolTimeoutMs: 10000
+    threadIdleMs: 60000
+
+- id: durable-host
+  name: './durable-host.mjs'

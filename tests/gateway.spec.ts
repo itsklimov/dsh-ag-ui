@@ -1,13 +1,9 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { HttpAgent } from '@ag-ui/client'
 import { EventType, type BaseEvent, type RunAgentInput, type Tool } from '@ag-ui/core'
-import { Context } from '@deepseek-ai/cordis'
-import type { Fiber } from '@deepseek-ai/cordis'
-import WebServer from '@deepseek-ai/dsh-host-webserver'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
-import { ScriptedAdapter, textResponse, toolResponse } from './scripted-adapter.ts'
-import { mountTestSpine } from './spine.ts'
-import AgUiGateway from 'dsh-ag-ui'
+import { disposeMountedContexts, mountGateway, runAgentEvents } from './harness.ts'
+import { textResponse, toolCallsResponse, toolResponse } from './scripted-adapter.ts'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 
 const SECRET = 'test-only-ag-ui-shared-secret'
@@ -17,37 +13,10 @@ const HEADERS = {
   'x-dsh-user-id': 'clinician-1',
 }
 
-interface Harness {
-  readonly ctx: Context
-  readonly adapter: ScriptedAdapter
-  readonly gateway: Fiber
-  readonly url: string
-}
+afterEach(() => disposeMountedContexts())
 
-const contexts: Context[] = []
-
-afterEach(async () => {
-  for (const ctx of contexts.splice(0).reverse()) await ctx.fiber.dispose()
-})
-
-async function mount(script: StreamChunk[][]): Promise<Harness> {
-  const ctx = new Context()
-  contexts.push(ctx)
-  await ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 })
-  await mountTestSpine(ctx, 'You assist a clinician with the current consultation draft.')
-  const adapter = new ScriptedAdapter(script)
-  ctx.llm.registerAdapter(['scripted'], adapter)
-  const gateway = await ctx.plugin(AgUiGateway, {
-    provider: 'scripted',
-    model: 'scripted',
-    sharedSecret: SECRET,
-    maxRunEvents: 128,
-    maxRunEventBytes: 128 * 1024,
-    frontendToolTimeoutMs: 10_000,
-    threadIdleMs: 60_000,
-  })
-  return { ctx, adapter, gateway, url: `http://127.0.0.1:${String(ctx.webServer.port)}/ag-ui` }
-}
+const mount = (script: StreamChunk[][]) =>
+  mountGateway(script, SECRET, { persona: 'You assist a clinician with the current consultation draft.' })
 
 const BACKEND_TOOL: ToolDefinition = {
   name: 'lookup_backend_record',
@@ -101,14 +70,11 @@ describe('AG-UI Gateway', () => {
       tenantId: 'spoofed-tenant',
     })
     agent.addMessage({ id: 'state-user', role: 'user', content: 'Improve the shared recipe.' })
-    const events: BaseEvent[] = []
-
-    await agent.runAgent({ runId: 'state-run', tools: [], context: [], forwardedProps: {} }, {
-      onEvent: ({ event }) => { events.push(event) },
-    })
+    const events = await runAgentEvents(agent, 'state-run', [])
 
     expect(events.map(event => event.type)).toEqual([
       EventType.RUN_STARTED,
+      EventType.MESSAGES_SNAPSHOT,
       EventType.STATE_SNAPSHOT,
       EventType.STATE_SNAPSHOT,
       EventType.TEXT_MESSAGE_START,
@@ -150,11 +116,7 @@ describe('AG-UI Gateway', () => {
     const agent = new HttpAgent({ url: harness.url, headers: HEADERS, threadId: 'shared-state-unchanged' })
     agent.setState({ status: 'draft', nested: { first: 1, second: 2 } })
     agent.addMessage({ id: 'state-unchanged-user', role: 'user', content: 'Keep the state unchanged.' })
-    const events: BaseEvent[] = []
-
-    await agent.runAgent({ runId: 'state-unchanged-run', tools: [], context: [], forwardedProps: {} }, {
-      onEvent: ({ event }) => { events.push(event) },
-    })
+    const events = await runAgentEvents(agent, 'state-unchanged-run', [])
 
     expect(events.filter(event => event.type === EventType.STATE_SNAPSHOT)).toEqual([
       { type: EventType.STATE_SNAPSHOT, snapshot: { status: 'draft', nested: { first: 1, second: 2 } } },
@@ -186,6 +148,7 @@ describe('AG-UI Gateway', () => {
 
     expect(firstEvents.map(event => event.type)).toEqual([
       EventType.RUN_STARTED,
+      EventType.MESSAGES_SNAPSHOT,
       EventType.TOOL_CALL_START,
       EventType.TOOL_CALL_ARGS,
       EventType.TOOL_CALL_END,
@@ -216,6 +179,7 @@ describe('AG-UI Gateway', () => {
 
     expect(secondEvents.map(event => event.type)).toEqual([
       EventType.RUN_STARTED,
+      EventType.MESSAGES_SNAPSHOT,
       EventType.TEXT_MESSAGE_START,
       EventType.TEXT_MESSAGE_CONTENT,
       EventType.TEXT_MESSAGE_END,
@@ -234,6 +198,120 @@ describe('AG-UI Gateway', () => {
         content.type === 'text' && content.text.includes('"version":4'))))).toBe(true)
   })
 
+  it('parks several frontend Tools in one step and resumes in subset runs', async () => {
+    const harness = await mount([
+      toolCallsResponse([
+        { callId: 'call-draft-a', name: PATCH_TOOL.name, args: { expectedVersion: 3, assessment: 'First assessment.' } },
+        { callId: 'call-draft-b', name: PATCH_TOOL.name, args: { expectedVersion: 3, assessment: 'Second assessment.' } },
+      ]),
+      textResponse('Both drafts applied within one turn.'),
+    ])
+    const agent = new HttpAgent({ url: harness.url, headers: HEADERS, threadId: 'encounter-multi' })
+    agent.addMessage({ id: 'multi-user-1', role: 'user', content: 'Write two assessments.' })
+    const tools = [PATCH_TOOL]
+
+    const firstEvents = await runAgentEvents(agent, 'multi-run-1', tools)
+    expect(firstEvents.map(event => event.type)).toEqual([
+      EventType.RUN_STARTED,
+      EventType.MESSAGES_SNAPSHOT,
+      EventType.TOOL_CALL_START,
+      EventType.TOOL_CALL_ARGS,
+      EventType.TOOL_CALL_END,
+      EventType.TOOL_CALL_START,
+      EventType.TOOL_CALL_ARGS,
+      EventType.TOOL_CALL_END,
+      EventType.RUN_FINISHED,
+    ])
+    const dshAgent = harness.ctx.agents.list()[0]
+    expect(dshAgent?.status).toBe('running')
+    expect(dshAgent?.session.events.filter(event => event.type === 'tool/call')).toHaveLength(2)
+    expect(dshAgent?.session.events.filter(event => event.type === 'tool/result')).toHaveLength(0)
+
+    agent.addMessage({
+      id: 'multi-result-a',
+      role: 'tool',
+      toolCallId: 'call-draft-a',
+      content: JSON.stringify({ status: 'applied', version: 4 }),
+    })
+    const secondEvents = await runAgentEvents(agent, 'multi-run-2', tools)
+    expect(secondEvents.map(event => event.type)).toEqual([
+      EventType.RUN_STARTED,
+      EventType.MESSAGES_SNAPSHOT,
+      EventType.RUN_FINISHED,
+    ])
+    expect(dshAgent?.status).toBe('running')
+    expect(dshAgent?.session.events.filter(event => event.type === 'tool/result')).toHaveLength(1)
+
+    agent.addMessage({
+      id: 'multi-result-b',
+      role: 'tool',
+      toolCallId: 'call-draft-b',
+      content: JSON.stringify({ status: 'applied', version: 5 }),
+    })
+    const thirdEvents = await runAgentEvents(agent, 'multi-run-3', tools)
+    expect(thirdEvents.map(event => event.type)).toEqual([
+      EventType.RUN_STARTED,
+      EventType.MESSAGES_SNAPSHOT,
+      EventType.TEXT_MESSAGE_START,
+      EventType.TEXT_MESSAGE_CONTENT,
+      EventType.TEXT_MESSAGE_END,
+      EventType.RUN_FINISHED,
+    ])
+    expect(dshAgent?.status).toBe('idle')
+    expect(dshAgent?.session.events.filter(event => event.type === 'turn/start')).toHaveLength(1)
+    expect(dshAgent?.session.events.filter(event => event.type === 'turn/end')).toHaveLength(1)
+    expect(dshAgent?.session.events.filter(event => event.type === 'tool/result')).toHaveLength(2)
+    expect(harness.adapter.requests).toHaveLength(2)
+  })
+
+  it('settles a mixed frontend/backend step once the exclusive backend call cannot start', async () => {
+    const harness = await mount([
+      toolCallsResponse([
+        { callId: 'mixed-frontend', name: PATCH_TOOL.name, args: { expectedVersion: 3, assessment: 'Mixed step.' } },
+        { callId: 'mixed-backend', name: BACKEND_TOOL.name, args: { recordId: 'record-7' } },
+      ]),
+      textResponse('The mixed step completed.'),
+    ])
+    harness.ctx.tools.register(BACKEND_TOOL)
+    const agent = new HttpAgent({ url: harness.url, headers: HEADERS, threadId: 'encounter-mixed' })
+    agent.addMessage({ id: 'mixed-user-1', role: 'user', content: 'Patch and look up.' })
+
+    const firstEvents = await runAgentEvents(agent, 'mixed-run-1', [PATCH_TOOL])
+    expect(firstEvents.map(event => event.type)).toEqual([
+      EventType.RUN_STARTED,
+      EventType.MESSAGES_SNAPSHOT,
+      EventType.TOOL_CALL_START,
+      EventType.TOOL_CALL_ARGS,
+      EventType.TOOL_CALL_END,
+      EventType.RUN_FINISHED,
+    ])
+
+    agent.addMessage({
+      id: 'mixed-result-frontend',
+      role: 'tool',
+      toolCallId: 'mixed-frontend',
+      content: JSON.stringify({ status: 'applied', version: 4 }),
+    })
+    const secondEvents = await runAgentEvents(agent, 'mixed-run-2', [PATCH_TOOL])
+    expect(secondEvents.map(event => event.type)).toEqual([
+      EventType.RUN_STARTED,
+      EventType.MESSAGES_SNAPSHOT,
+      EventType.TOOL_CALL_START,
+      EventType.TOOL_CALL_ARGS,
+      EventType.TOOL_CALL_END,
+      EventType.CUSTOM,
+      EventType.TOOL_CALL_RESULT,
+      EventType.CUSTOM,
+      EventType.TEXT_MESSAGE_START,
+      EventType.TEXT_MESSAGE_CONTENT,
+      EventType.TEXT_MESSAGE_END,
+      EventType.RUN_FINISHED,
+    ])
+    const dshAgent = harness.ctx.agents.list()[0]
+    expect(dshAgent?.session.events.filter(event => event.type === 'tool/result')).toHaveLength(2)
+    expect(dshAgent?.session.events.filter(event => event.type === 'turn/start')).toHaveLength(1)
+  })
+
   it('accepts official-client backend ToolMessage history without echoing frontend results', async () => {
     const harness = await mount([
       toolResponse('backend-call', BACKEND_TOOL.name, { recordId: 'record-7' }),
@@ -248,28 +326,19 @@ describe('AG-UI Gateway', () => {
     const agent = new HttpAgent({ url: harness.url, headers: HEADERS, threadId: 'encounter-history' })
     agent.addMessage({ id: 'user-backend', role: 'user', content: 'Look up record 7.' })
 
-    const backendEvents: BaseEvent[] = []
-    await agent.runAgent({ runId: 'run-backend', tools: [], context: [], forwardedProps: {} }, {
-      onEvent: ({ event }) => { backendEvents.push(event) },
-    })
+    const backendEvents = await runAgentEvents(agent, 'run-backend', [])
     expect(backendEvents.map(event => event.type)).toContain(EventType.TOOL_CALL_RESULT)
     expect(agent.messages.some(message => message.role === 'tool' && message.toolCallId === 'backend-call')).toBe(true)
 
     agent.addMessage({ id: 'user-frontend', role: 'user', content: 'Update the assessment.' })
-    const frontendCallEvents: BaseEvent[] = []
-    await agent.runAgent({ runId: 'run-frontend-call', tools: [PATCH_TOOL], context: [], forwardedProps: {} }, {
-      onEvent: ({ event }) => { frontendCallEvents.push(event) },
-    })
+    const frontendCallEvents = await runAgentEvents(agent, 'run-frontend-call', [PATCH_TOOL])
     agent.addMessage({
       id: 'frontend-result',
       role: 'tool',
       toolCallId: 'frontend-call',
       content: JSON.stringify({ status: 'applied' }),
     })
-    const frontendResultEvents: BaseEvent[] = []
-    await agent.runAgent({ runId: 'run-frontend-result', tools: [PATCH_TOOL], context: [], forwardedProps: {} }, {
-      onEvent: ({ event }) => { frontendResultEvents.push(event) },
-    })
+    const frontendResultEvents = await runAgentEvents(agent, 'run-frontend-result', [PATCH_TOOL])
 
     expect(frontendCallEvents.map(event => event.type)).toContain(EventType.TOOL_CALL_END)
     expect(frontendResultEvents.some(event => event.type === EventType.TOOL_CALL_RESULT)).toBe(false)
