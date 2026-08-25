@@ -96,6 +96,9 @@ importers:
       '@deepseek-ai/cordis-plugin-loader':
         specifier: 1.0.2
         version: 1.0.2(@deepseek-ai/cordis@4.0.1)
+      rxjs:
+        specifier: ^7.8.1
+        version: 7.8.1
     devDependencies:
       '@ag-ui/client':
         specifier: 0.0.58
@@ -130,9 +133,6 @@ importers:
       rimraf:
         specifier: 6.1.3
         version: 6.1.3
-      rxjs:
-        specifier: 7.8.1
-        version: 7.8.1
       tsdown:
         specifier: 0.22.14
         version: 0.22.14(publint@0.3.24)(typescript@6.0.3)

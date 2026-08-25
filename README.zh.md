@@ -251,7 +251,7 @@ Package 以 `dsh-ag-ui/dojo-host` 发布 framework-free BFF plugin。Keyless scr
 
 ## 嵌入适配器
 
-独立的 [`dsh-ag-ui-adapter`](packages/dsh-ag-ui-adapter) 包是本部署形态网关的嵌入形态对应物。`DshAgent`（`AbstractAgent` 子类）spawn 一个 DSH 微型 Host 子进程——由 Cordis overlay 组合环回 webserver（临时端口）、本网关（按进程生成的 secret）以及调用方的 agent spine 与 model rows——并通过环回 HTTP 以官方 client 原语实现 `run()`，不新增任何协议翻译代码。用法、plugin row 解析、生命周期与嵌入形态的信任姿态见其 README。
+独立的 [`dsh-ag-ui-adapter`](packages/dsh-ag-ui-adapter) 包是本部署形态网关的嵌入形态对应物。`DshAgent`（`AbstractAgent` 子类）spawn 一个 DSH 微型 Host 子进程——由 Cordis overlay 组合环回 webserver（临时端口）、本网关（按进程生成的 secret）以及调用方的 agent spine 与 model rows——并通过环回 HTTP 以官方 client 原语实现 `run()`，不新增任何协议翻译代码。Host 在首次 run 时才惰性启动，可按空闲窗口自动关闭，且绝不会比宿主进程活得更久。用法、plugin row 解析、环境变量回退、生命周期与嵌入形态的信任姿态见其 README。
 
 ## HTTP 与 run 语义
 

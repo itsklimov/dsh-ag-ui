@@ -54,6 +54,12 @@ describe('overlayRows', () => {
     })
   })
 
+  it('maps a resolved preset to the gateway agentPreset and omits it when absent', () => {
+    expect(overlayRows(inputs({ gateway: { provider: 'openai', model: 'gpt-5.6-sol', preset: 'base' } }))[1]?.config)
+      .toMatchObject({ agentPreset: 'base' })
+    expect(overlayRows(inputs())[1]?.config).not.toHaveProperty('agentPreset')
+  })
+
   it('defaults the gateway path', () => {
     expect(overlayRows(inputs())[1]?.config).toMatchObject({ path: '/ag-ui' })
   })

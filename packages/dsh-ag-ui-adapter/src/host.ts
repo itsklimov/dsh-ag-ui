@@ -14,11 +14,11 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { DEFAULT_GATEWAY_PATH, generateSharedSecret, overlayRows } from './overlay.ts'
 import { resolveHostModule } from './resolve.ts'
-import type { DshGatewayOptions, HostPluginRow } from './types.ts'
+import type { HostPluginRow, ResolvedGatewayOptions } from './types.ts'
 
 /** What the embedded application configures about its micro-host. */
 export interface MicroHostOptions {
-  readonly gateway: DshGatewayOptions
+  readonly gateway: ResolvedGatewayOptions
   /** Extra overlay rows between the webserver and the gateway. */
   readonly plugins?: readonly HostPluginRow[] | undefined
   /** Milliseconds to wait for the child to report readiness; default 20000. */
@@ -38,6 +38,16 @@ const HOST_BOOT = new URL('lib/host-boot.js', PACKAGE_ROOT)
 const HOST_REPORTER = new URL('lib/host-reporter.js', PACKAGE_ROOT)
 /** Bounded stderr tail kept for failure diagnostics. */
 const DIAGNOSTIC_BYTES = 8192
+
+/** Children of hosts that are still alive in this process. */
+const liveChildren = new Set<ChildProcess>()
+// an embedding process that exits without stopping its hosts must not orphan them
+/* v8 ignore next 6 -- only reachable at real parent process exit */
+process.once('exit', () => {
+  for (const child of liveChildren) {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+  }
+})
 
 function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -74,6 +84,7 @@ function waitForExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
  * to SIGKILL after the grace period. A child that is already gone is a no-op.
  */
 async function terminate(child: ChildProcess, mode: 'graceful' | 'immediate'): Promise<void> {
+  liveChildren.delete(child)
   if (child.exitCode !== null || child.signalCode !== null) return
   if (mode === 'immediate') {
     child.kill('SIGKILL')
@@ -134,6 +145,7 @@ export class MicroHost {
       [fileURLToPath(HOST_BOOT), resolveHostModule('@deepseek-ai/cordis-plugin-include')],
       { cwd: directory, env: { ...process.env, ...options.env }, stdio: ['ignore', 'pipe', 'pipe'] },
     )
+    liveChildren.add(child)
     let diagnostics = ''
     const record = (chunk: Buffer): void => {
       diagnostics = `${diagnostics}${chunk.toString('utf8')}`.slice(-DIAGNOSTIC_BYTES)

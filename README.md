@@ -251,7 +251,7 @@ The package ships the framework-free BFF plugin as `dsh-ag-ui/dojo-host`. The ke
 
 ## Embedded adapter
 
-The separate [`dsh-ag-ui-adapter`](packages/dsh-ag-ui-adapter) package is the embedded counterpart of this deployment-form Gateway. A `DshAgent` (`AbstractAgent` subclass) spawns a DSH micro-host child — a Cordis overlay composing the loopback webserver on an ephemeral port, this Gateway with a per-process generated secret, and the caller's agent-spine and model rows — and passes `run()` through loopback HTTP using the official client primitives, adding no protocol translation code. See its README for usage, plugin row resolution, lifecycle, and the trust posture of the embedded shape.
+The separate [`dsh-ag-ui-adapter`](packages/dsh-ag-ui-adapter) package is the embedded counterpart of this deployment-form Gateway. A `DshAgent` (`AbstractAgent` subclass) spawns a DSH micro-host child — a Cordis overlay composing the loopback webserver on an ephemeral port, this Gateway with a per-process generated secret, and the caller's agent-spine and model rows — and passes `run()` through loopback HTTP using the official client primitives, adding no protocol translation code. The host starts lazily on the first run, can idle-shut-down, and never outlives the embedding process. See its README for usage, plugin row resolution, environment fallback, lifecycle, and the trust posture of the embedded shape.
 
 ## HTTP and run semantics
 

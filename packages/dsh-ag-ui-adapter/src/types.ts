@@ -20,10 +20,22 @@ export interface HostPluginRow {
 
 /** The gateway row of the generated micro-host overlay. */
 export interface DshGatewayOptions {
-  /** Registered DSH model provider route served by the micro-host. */
-  readonly provider: string
-  /** Model ID owned by the provider. */
-  readonly model: string
+  /**
+   * Registered DSH model provider route served by the micro-host. Falls back
+   * to `DSH_AG_UI_ADAPTER_PROVIDER`; one of the two must be present.
+   */
+  readonly provider?: string | undefined
+  /**
+   * Model ID owned by the provider. Falls back to `DSH_AG_UI_ADAPTER_MODEL`;
+   * one of the two must be present.
+   */
+  readonly model?: string | undefined
+  /**
+   * Deployment-default agent preset id composed into every thread (the
+   * gateway row's `agentPreset`). Falls back to `DSH_AG_UI_ADAPTER_PRESET`;
+   * omitted when neither is present.
+   */
+  readonly preset?: string | undefined
   /** Exact Host HTTP route of the gateway; defaults to `/ag-ui`. */
   readonly path?: string | undefined
   /**
@@ -31,4 +43,10 @@ export interface DshGatewayOptions {
    * this for resource bounds such as `maxRunEvents` or `threadIdleMs`.
    */
   readonly overrides?: Readonly<Record<string, unknown>> | undefined
+}
+
+/** Gateway options after the environment fallback has filled every gap. */
+export interface ResolvedGatewayOptions extends DshGatewayOptions {
+  readonly provider: string
+  readonly model: string
 }

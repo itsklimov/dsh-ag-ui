@@ -9,7 +9,7 @@
  */
 
 import { randomBytes } from 'node:crypto'
-import type { DshGatewayOptions, HostPluginRow } from './types.ts'
+import type { HostPluginRow, ResolvedGatewayOptions } from './types.ts'
 
 /** One serialized loader entry of the generated `cordis.yml`. */
 export interface OverlayRow {
@@ -30,8 +30,8 @@ export interface OverlayInputs {
   readonly readyFile: string
   /** Per-process bearer secret the adapter sends to its own gateway. */
   readonly sharedSecret: string
-  /** The caller's gateway row options. */
-  readonly gateway: DshGatewayOptions
+  /** The caller's gateway row options, after the environment fallback. */
+  readonly gateway: ResolvedGatewayOptions
   /** The caller's plugin rows, already resolved to `file:` URLs. */
   readonly plugins: readonly (Omit<HostPluginRow, 'name'> & { readonly name: string })[]
 }
@@ -54,6 +54,7 @@ export function overlayRows(inputs: OverlayInputs): OverlayRow[] {
     model: inputs.gateway.model,
     sharedSecret: inputs.sharedSecret,
     path: inputs.gateway.path ?? DEFAULT_GATEWAY_PATH,
+    ...(inputs.gateway.preset === undefined ? {} : { agentPreset: inputs.gateway.preset }),
     ...inputs.gateway.overrides,
   }
   return [
