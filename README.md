@@ -13,6 +13,7 @@ A community [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 
 ## Features
 
 - Standard Cordis `Service` plugin exposed as `ctx.agUi`
+- Transport-neutral Agent-scoped browser Tool broker exposed as `ctx.browserTools`
 - Installable DSH Profile Bundle through `dsh plugin add`
 - Floored AG-UI protocol range (`~0.0.58`)
 - Authenticated BFF-to-Gateway requests with trusted tenant and user headers
@@ -50,7 +51,7 @@ For the GitHub checkout before an npm release:
 dsh plugin --profile web add github:CaiZongyuan/dsh-ag-ui
 ```
 
-The bundle stays dormant until all required environment variables are present. This prevents an installation from breaking a Profile before the deployment chooses a model route and secret.
+The bundle always mounts the lightweight `browser-tools` row. The AG-UI Gateway row stays dormant until all required environment variables are present, so native DSH integrations can lease browser-owned Tools without configuring a second model route or Gateway secret.
 
 ```bash
 export DSH_AG_UI_PROVIDER='openai'
@@ -61,7 +62,22 @@ export DSH_AG_UI_PATH='/ag-ui' # optional
 dsh --profile web
 ```
 
-The bundle inserts one Host-plane `ag-ui` row that loads the Gateway service. The package also exports `dsh-ag-ui/invariant`; compositions that provide a process-global `invariants` service may load that optional companion explicitly. The default web Profile does not provide that service, so the installable bundle does not mount the companion automatically.
+The bundle inserts an always-on `browser-tools` row and a conditional Host-plane `ag-ui` row. The first never creates an Agent: another integration selects an existing Agent and supplies a browser transport. The package also exports `dsh-ag-ui/invariant`; compositions that provide a process-global `invariants` service may load that optional companion explicitly. The default web Profile does not provide that service, so the installable bundle does not mount the companion automatically.
+
+## Browser Tool broker
+
+`dsh-ag-ui/browser-tools` hides provider-safe name checks, object-rooted schema validation, exact Agent-scope registration, catalog replacement, collisions, cancellation, timeout, and lease teardown behind one interface. A caller owns Agent selection and transport:
+
+```ts
+const lease = ctx.browserTools.bind(agent, owner, tools, {
+  invoke: (call, signal) => browserTransport.invoke(call, signal),
+})
+
+lease.update(nextTools)
+lease.dispose()
+```
+
+Browser context and Tool results are capability data, not authorization. Durable actions still require server-owned identity, resource checks, and any domain confirmation flow.
 
 ## Profile configuration
 

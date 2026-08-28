@@ -25,6 +25,10 @@
       "types": "./lib/types/index.d.ts",
       "default": "./lib/index.js"
     },
+    "./browser-tools": {
+      "types": "./lib/types/browser-tools.d.ts",
+      "default": "./lib/browser-tools.js"
+    },
     "./invariant": {
       "types": "./lib/types/invariant.d.ts",
       "default": "./lib/invariant.js"
@@ -35,6 +39,8 @@
   "files": [
     "lib/index.js",
     "lib/index.js.map",
+    "lib/browser-tools.js",
+    "lib/browser-tools.js.map",
     "lib/invariant.js",
     "lib/invariant.js.map",
     "lib/types/**/*.d.ts",

@@ -1,6 +1,9 @@
-# Install the AG-UI Gateway in the Host plane. The row stays dormant until all
-# three required environment variables are configured by the deployment.
+# Browser Tool leasing is always available. The Gateway row stays dormant until
+# all three required environment variables are configured by the deployment.
 - insert:
+    - id: browser-tools
+      name: dsh-ag-ui/browser-tools
+      config: {}
     - id: ag-ui
       name: dsh-ag-ui
       disabled: !!js >-

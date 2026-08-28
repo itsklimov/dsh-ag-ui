@@ -13,6 +13,7 @@
 ## 功能
 
 - 通过 `ctx.agUi` 暴露的标准 Cordis `Service` 插件
+- 通过 `ctx.browserTools` 暴露的传输无关 Agent-scoped browser Tool broker
 - 可使用 `dsh plugin add` 安装的 DSH Profile Bundle
 - 下限式 AG-UI 协议范围（`~0.0.58`）
 - 使用可信 tenant/user headers 的 BFF-to-Gateway 认证
@@ -50,7 +51,7 @@ npm 发布前可直接从 GitHub checkout 安装：
 dsh plugin --profile web add github:CaiZongyuan/dsh-ag-ui
 ```
 
-在全部必需环境变量存在之前，bundle 保持 dormant。这样安装 package 不会在 deployment 尚未选择 model route 和 secret 时破坏 Profile。
+Bundle 始终挂载轻量的 `browser-tools` row。只有 AG-UI Gateway row 会在全部必需环境变量存在前保持 dormant，因此原生 DSH 集成可以租用 browser-owned Tools，而不必再配置一套 model route 或 Gateway secret。
 
 ```bash
 export DSH_AG_UI_PROVIDER='openai'
@@ -61,7 +62,22 @@ export DSH_AG_UI_PATH='/ag-ui' # 可选
 dsh --profile web
 ```
 
-Bundle 插入一个 Host-plane `ag-ui` row 来加载 Gateway service。Package 仍导出 `dsh-ag-ui/invariant`；提供 process-global `invariants` service 的 composition 可以显式加载该可选 companion。默认 web Profile 不提供该 service，因此 installable bundle 不会自动挂载 companion。
+Bundle 插入一个始终启用的 `browser-tools` row 和一个按条件启用的 Host-plane `ag-ui` row。前者从不创建 Agent：调用方负责选择已有 Agent 并提供浏览器传输。Package 仍导出 `dsh-ag-ui/invariant`；提供 process-global `invariants` service 的 composition 可以显式加载该可选 companion。默认 web Profile 不提供该 service，因此 installable bundle 不会自动挂载 companion。
+
+## Browser Tool broker
+
+`dsh-ag-ui/browser-tools` 用一个接口隐藏 provider-safe 名称检查、object-rooted schema 校验、精确 Agent scope 注册、目录替换、冲突、取消、超时和租约回收。调用方拥有 Agent 选择与传输：
+
+```ts
+const lease = ctx.browserTools.bind(agent, owner, tools, {
+  invoke: (call, signal) => browserTransport.invoke(call, signal),
+})
+
+lease.update(nextTools)
+lease.dispose()
+```
+
+浏览器上下文和 Tool result 是能力数据，不是授权。持久化动作仍必须经过服务端身份、资源校验和领域确认流程。
 
 ## Profile 配置
 
