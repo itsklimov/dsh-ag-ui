@@ -14,7 +14,7 @@ import type { Config } from 'dsh-ag-ui'
 import AgUiGateway from 'dsh-ag-ui'
 import { ScriptedAdapter, textResponse, toolCallsResponse } from './scripted-adapter.ts'
 import { runAgentEvents } from './harness.ts'
-import { mountTestSpine } from './spine.ts'
+import { mountTestAgentCore } from './agent-core.ts'
 import { durableSessionId } from '../src/session-id.ts'
 import { sessionPresetOf } from '../src/presets.ts'
 import { ThreadBinding, type ThreadOptions } from '../src/thread.ts'
@@ -41,9 +41,10 @@ afterEach(async () => {
 
 async function mount(overrides: Partial<Config> = {}, script: StreamChunk[][] = [textResponse('ok')], withRoster = true): Promise<{ url: string, adapter: ScriptedAdapter }> {
   const ctx = new Context()
+  ctx.baseUrl = new URL('./fixtures/presets/roots/', import.meta.url).href
   contexts.push(ctx)
   await ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 })
-  await mountTestSpine(ctx)
+  await mountTestAgentCore(ctx)
   if (withRoster) {
     await ctx.plugin(Loader)
     await ctx.plugin(AgentPresets, { default: 'alpha', roots: [{ path: ROOT, trust: 'system' }], includeUserRoot: false })
@@ -157,7 +158,7 @@ describe('threads refuse a configured preset without a roster', () => {
   it('fails thread initialization loudly when no roster is active', async () => {
     const ctx = new Context()
     contexts.push(ctx)
-    await mountTestSpine(ctx)
+    await mountTestAgentCore(ctx)
     const principal = { tenantId: 'tenant-1', userId: 'user-1' }
     const binding = new ThreadBinding(
       ctx,
@@ -221,8 +222,9 @@ describe('resumed threads keep their recorded composition', () => {
     const sessionId = durableSessionId(principal, 'preset-resume', SECRET)
 
     const first = new Context()
+    first.baseUrl = new URL('./fixtures/presets/roots/', import.meta.url).href
     contexts.push(first)
-    await mountTestSpine(first)
+    await mountTestAgentCore(first)
     await first.plugin(Loader)
     await first.plugin(AgentPresets, { default: 'alpha', roots: [{ path: ROOT, trust: 'system' }], includeUserRoot: false })
     first.llm.registerAdapter(['scripted'], new ScriptedAdapter([textResponse('alpha turn done.')]))
@@ -248,8 +250,9 @@ describe('resumed threads keep their recorded composition', () => {
 
     // the deployment now points this tenant at beta; the resumed session still composes alpha
     const second = new Context()
+    second.baseUrl = new URL('./fixtures/presets/roots/', import.meta.url).href
     contexts.push(second)
-    await mountTestSpine(second)
+    await mountTestAgentCore(second)
     await second.plugin(Loader)
     await second.plugin(AgentPresets, { default: 'alpha', roots: [{ path: ROOT, trust: 'system' }], includeUserRoot: false })
     second.llm.registerAdapter(['scripted'], new ScriptedAdapter([

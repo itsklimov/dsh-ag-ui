@@ -5,7 +5,7 @@
 
 import { EventType, type CustomEvent } from '@ag-ui/core'
 import type { ContentBlock, ToolResultBlock } from '@deepseek-ai/dsh-llm'
-import type { JsonValue } from '@deepseek-ai/dsh-session'
+import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { ToolCallView, ToolDefinition, ToolResultView } from '@deepseek-ai/dsh-tools'
 
 /** CUSTOM event name carrying one presenter card beside the standard tool events. */

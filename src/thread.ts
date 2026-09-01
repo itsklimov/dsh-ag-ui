@@ -8,7 +8,7 @@ import {
   type UserMessage as AgUiUserMessage,
 } from '@ag-ui/core'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
-import { CallId, createUserMessage, errorChain, freezeMessage, MessageId } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, errorChain, freezeMessage, MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import {
   assertObjectJsonSchema,
@@ -30,7 +30,7 @@ const FRONTEND_TOOL_NAME = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/
 
 /** Fixed identity for registry scheduling probes that never dispatch. */
 const SCHEDULING_PROBE = {
-  callId: CallId('ag-ui-scheduling-probe'),
+  callId: ToolCallId('ag-ui-scheduling-probe'),
   arguments: {},
   signal: new AbortController().signal,
 }

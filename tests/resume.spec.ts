@@ -1,13 +1,14 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { EventType, type RunAgentInput } from '@ag-ui/core'
 import { ScriptedAdapter, textResponse } from './scripted-adapter.ts'
-import { mountTestSpine } from './spine.ts'
+import { mountTestAgentCore } from './agent-core.ts'
 import { durableSessionId } from '../src/session-id.ts'
 import { ThreadBinding, type ThreadOptions } from '../src/thread.ts'
 
@@ -20,6 +21,8 @@ import { ThreadBinding, type ThreadOptions } from '../src/thread.ts'
 const PRINCIPAL = { tenantId: 'tenant-resume', userId: 'user-resume' }
 const SECRET = 'resume-test-shared-secret'
 const SESSION = durableSessionId(PRINCIPAL, 'thread-resume', SECRET)
+const RC2_SESSION = SessionId('ag-ui-0c27b585ac1d7528dde9c37ee11ef9ff51f4d310')
+const RC2_FIXTURE = fileURLToPath(new URL('./fixtures/sessions/dsh-0.1.1-rc.2.jsonl', import.meta.url))
 
 const OPTIONS: ThreadOptions = {
   provider: 'scripted',
@@ -45,7 +48,7 @@ async function mountDurable(script: ScriptedAdapter['script'], root?: string): P
   contexts.push(ctx)
   const durableRoot = root ?? await mkdtemp(join(tmpdir(), 'ag-ui-resume-'))
   if (root === undefined) roots.push(durableRoot)
-  await mountTestSpine(ctx)
+  await mountTestAgentCore(ctx)
   const adapter = new ScriptedAdapter(script)
   ctx.llm.registerAdapter(['scripted'], adapter)
   await ctx.plugin(JsonlSessionPersistence, { root: durableRoot, compression: 'none' })
@@ -110,6 +113,30 @@ describe('ThreadBinding durable resume', () => {
     })
     expect(second.adapter.requests).toHaveLength(1)
     expect(JSON.stringify(second.adapter.requests[0]?.messages)).toContain('pine-cone-7')
+  })
+
+  it('resumes and continues a session recorded by DSH 0.1.1-rc.2', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'ag-ui-rc2-resume-'))
+    roots.push(root)
+    const sessionDir = join(root, '_no-cwd', String(RC2_SESSION))
+    await mkdir(sessionDir, { recursive: true })
+    await copyFile(RC2_FIXTURE, join(sessionDir, 'session.jsonl'))
+
+    const mounted = await mountDurable([textResponse('History kept the codeword pine-cone-7.')], root)
+    const resumed = bindingFor(mounted.ctx, RC2_SESSION)
+    await resumed.initialize()
+    expect(resumed.liveAgent.session.events.some(event =>
+      event.type === 'assistant/message' && JSON.stringify(event.data).includes('pine-cone-7'))).toBe(true)
+
+    const continuation = resumed.reserveRun(input('run-rc2-resume', [
+      { id: 'rc2-user-1', role: 'user', content: 'Set the codeword.' },
+      { id: 'rc2-user-2', role: 'user', content: 'Repeat the codeword.' },
+    ]), 'digest-rc2-resume')
+    resumed.drive(continuation)
+    await continuation.done
+
+    expect(eventsOf(continuation).at(-1)).toMatchObject({ type: EventType.RUN_FINISHED })
+    expect(JSON.stringify(mounted.adapter.requests[0]?.messages)).toContain('pine-cone-7')
   })
 
   it('rejects a resent user message whose content changed after the restart', async () => {

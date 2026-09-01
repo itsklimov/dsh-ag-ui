@@ -15,6 +15,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Browser Tool names now accept standard AG-UI-compatible ASCII identifiers while reserving the internal state Tool name.
 - Consolidated internal Tool-call and Run-event bookkeeping and removed redundant source fixtures without changing protocol behavior.
+- Upgraded the exact DeepSeek Harness compatibility target to `0.1.2-alpha.3` and replaced the removed composition package with supported explicit Agent-core rows.
 
 ## [0.1.0] - 2026-08-22
 

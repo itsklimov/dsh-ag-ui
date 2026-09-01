@@ -11,7 +11,7 @@ An [`@ag-ui/client`](https://www.npmjs.com/package/@ag-ui/client) `AbstractAgent
 
 The adapter is a process manager plus a thin agent shell:
 
-1. It composes a Cordis overlay — the same `cordis.yml` row format the documented Cordis-Loader overlay mechanism reads — containing a `@deepseek-ai/dsh-host-webserver` row bound to `127.0.0.1` on an ephemeral port, your plugin rows (agent spine, model adapter), the published `dsh-ag-ui` gateway row with a freshly generated per-process bearer secret, and a readiness reporter.
+1. It composes a Cordis overlay — the same `cordis.yml` row format the documented Cordis-Loader overlay mechanism reads — containing a `@deepseek-ai/dsh-host-webserver` row bound to `127.0.0.1` on an ephemeral port, your plugin rows (Agent core, model adapter), the published `dsh-ag-ui` gateway row with a freshly generated per-process bearer secret, and a readiness reporter.
 2. It writes that overlay into a clean temporary directory and spawns the child-side bootstrap through the current Node executable. The bootstrap mirrors `@deepseek-ai/cordis/bin.js` and loads the overlay with `@deepseek-ai/cordis-plugin-include`. No upstream package is patched or re-implemented.
 3. Once the webserver and the gateway service are both active, the reporter writes the actually bound address, and `start()` resolves.
 4. `run(input)` is composed entirely from the official client primitives — `runHttpRequest` over `fetch` and `transformHttpEventStream` — exactly like `HttpAgent.run`, so the adapter adds zero protocol translation code. Its only couplings are the published `dsh-ag-ui` gateway, the AG-UI client, and the DSH loader/webserver peers.
@@ -21,7 +21,18 @@ No child process exists until the first run needs one: `run()` starts the micro-
 ## Usage
 
 ```bash
-pnpm add dsh-ag-ui-adapter @ag-ui/client dsh-ag-ui @deepseek-ai/cordis @deepseek-ai/dsh-host-webserver
+pnpm add dsh-ag-ui-adapter @ag-ui/client dsh-ag-ui \
+  @deepseek-ai/cordis@4.0.2 \
+  @deepseek-ai/dsh-host-webserver@0.1.2-alpha.3 \
+  @deepseek-ai/dsh-agent@0.1.2-alpha.3 \
+  @deepseek-ai/dsh-agent-loop@0.1.2-alpha.3 \
+  @deepseek-ai/dsh-invariants@0.1.2-alpha.3 \
+  @deepseek-ai/dsh-llm@0.1.2-alpha.3 \
+  @deepseek-ai/dsh-session@0.1.2-alpha.3 \
+  @deepseek-ai/dsh-session-projection@0.1.2-alpha.3 \
+  @deepseek-ai/dsh-system-prompt@0.1.2-alpha.3 \
+  @deepseek-ai/dsh-tools@0.1.2-alpha.3 \
+  @deepseek-ai/dsh-util-values@0.1.2-alpha.3
 ```
 
 ```ts
@@ -37,9 +48,20 @@ const agent = new DshAgent({
     overrides: { threadIdleMs: 60000 },
   },
   plugins: [
-    // rows between the webserver and the gateway: the agent spine and model
-    // adapter of the Host you want to embed
-    { id: 'agent-spine', name: '@deepseek-ai/dsh-agent-spine-demo', config: {} },
+    // Minimal supported Agent core. Add optional DSH capabilities as their own rows.
+    { id: 'llm', name: '@deepseek-ai/dsh-llm' },
+    { id: 'session', name: '@deepseek-ai/dsh-session' },
+    { id: 'session-projection', name: '@deepseek-ai/dsh-session-projection' },
+    {
+      id: 'system-prompt',
+      name: '@deepseek-ai/dsh-system-prompt',
+      config: { persona: 'You are a helpful assistant.' },
+    },
+    { id: 'tools', name: '@deepseek-ai/dsh-tools' },
+    { id: 'agent', name: '@deepseek-ai/dsh-agent' },
+    { id: 'agent-loop', name: '@deepseek-ai/dsh-agent-loop', config: { agents: [] } },
+
+    // Application-owned model provider.
     { id: 'my-provider', name: 'file:///abs/path/to/provider-plugin.mjs' },
   ],
   tenantId: 'my-app',
@@ -102,7 +124,7 @@ The timeout variables must be positive integers in canonical form (`1500`, not `
 | --- | --- |
 | AG-UI client | `>=0.0.58 <0.1.0` (`~0.0.58`; tested with `0.0.58`) |
 | Node.js | `^22.19.0 || >=24.0.0` |
-| DeepSeek Harness | Developer preview packages listed in `peerDependencies` |
+| DeepSeek Harness | `0.1.2-alpha.3` (exact developer-preview peers) |
 
 ## Development
 

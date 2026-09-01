@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { randomUUID } from '@ag-ui/client'
 import { DshAgent } from '../src/agent.ts'
 import { MODEL_ENV, PROVIDER_ENV } from '../src/config.ts'
-import { SCRIPTED_MODEL_ROW, SPINE_ROW } from './rows.ts'
+import { AGENT_CORE_ROWS, SCRIPTED_MODEL_ROW } from './rows.ts'
 
 /**
  * The keyless scripted agentic-chat scenario, end to end through the adapter:
@@ -20,7 +20,7 @@ function scriptedAgent(): DshAgent {
   const agent = new DshAgent({
     threadId: 'adapter-thread',
     gateway: { provider: 'scripted', model: 'scripted' },
-    plugins: [SPINE_ROW, SCRIPTED_MODEL_ROW],
+    plugins: [...AGENT_CORE_ROWS, SCRIPTED_MODEL_ROW],
   })
   agents.push(agent)
   return agent
@@ -97,7 +97,7 @@ describe('DshAgent', () => {
     process.env[PROVIDER_ENV] = 'scripted'
     process.env[MODEL_ENV] = 'scripted'
     try {
-      const agent = new DshAgent({ threadId: 'adapter-thread', plugins: [SPINE_ROW, SCRIPTED_MODEL_ROW] })
+      const agent = new DshAgent({ threadId: 'adapter-thread', plugins: [...AGENT_CORE_ROWS, SCRIPTED_MODEL_ROW] })
       agents.push(agent)
       await ask(agent, 'Hello again.')
       expect(assistantText(agent)).toBe('Hello from the DSH AG-UI adapter.')
@@ -117,7 +117,7 @@ describe('DshAgent', () => {
     const agent = new DshAgent({
       threadId: 'adapter-thread',
       gateway: { provider: 'scripted', model: 'scripted' },
-      plugins: [SPINE_ROW, SCRIPTED_MODEL_ROW],
+      plugins: [...AGENT_CORE_ROWS, SCRIPTED_MODEL_ROW],
       idleShutdownMs: 150,
     })
     agents.push(agent)
@@ -144,7 +144,7 @@ describe('DshAgent', () => {
   it('cleans up after a failed start and stops cleanly', async () => {
     const agent = new DshAgent({
       threadId: 'adapter-thread',
-      // without an agent spine the gateway never activates, so readiness times out
+      // without the Agent core the gateway never activates, so readiness times out
       gateway: { provider: 'scripted', model: 'scripted' },
       plugins: [SCRIPTED_MODEL_ROW],
       readyTimeoutMs: 500,

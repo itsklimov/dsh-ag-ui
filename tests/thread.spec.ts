@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { EventType, type RunAgentInput, type Tool } from '@ag-ui/core'
 import { Context } from '@deepseek-ai/cordis'
-import { CallId, createAssistantMessage, createToolResultMessage, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, createAssistantMessage, createToolResultMessage, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { ScriptedAdapter, textResponse, toolResponse as scriptedToolResponse } from './scripted-adapter.ts'
-import { mountTestSpine } from './spine.ts'
+import { mountTestAgentCore } from './agent-core.ts'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { ThreadBinding, type ThreadOptions } from '../src/thread.ts'
@@ -44,7 +44,7 @@ function toolResponse(callId: string, args: object): StreamChunk[] {
 async function mount(script: StreamChunk[][] = [textResponse('ok')], overrides: Partial<ThreadOptions> = {}) {
   const ctx = new Context()
   contexts.push(ctx)
-  await mountTestSpine(ctx)
+  await mountTestAgentCore(ctx)
   const adapter = new ScriptedAdapter(script)
   ctx.llm.registerAdapter(['scripted'], adapter)
   let expired = 0
@@ -567,7 +567,7 @@ describe('ThreadBinding shared state', () => {
   it('rejects invalid, duplicate, and oversized prepared state updates', async () => {
     const inactive = await mount([])
     const inactiveExec = {
-      callId: CallId('inactive-state-call'),
+      callId: ToolCallId('inactive-state-call'),
       signal: new AbortController().signal,
     } as ToolRunContext
     expect(() => internals(inactive.binding).prepareSharedStateUpdate({ state_updates: {} }, inactiveExec))
@@ -584,7 +584,7 @@ describe('ThreadBinding shared state', () => {
 
     const state = internals(binding)
     const signal = new AbortController().signal
-    const exec = { callId: CallId('state-private-call'), signal } as ToolRunContext
+    const exec = { callId: ToolCallId('state-private-call'), signal } as ToolRunContext
     expect(() => state.prepareSharedStateUpdate({ state_updates: { value: 2 } }, exec))
       .toThrow('no DSH call position')
 
@@ -597,7 +597,7 @@ describe('ThreadBinding shared state', () => {
     binding.liveAgent.session.append('turn/start', { turn: 2 })
     binding.liveAgent.session.append('step/start', { turn: 2, step: 1 })
     binding.liveAgent.session.append('tool/call', {
-      turn: 2, step: 1, callId: CallId('state-private-call'), name: 'ag_ui_update_state', arguments: '{}',
+      turn: 2, step: 1, callId: ToolCallId('state-private-call'), name: 'ag_ui_update_state', arguments: '{}',
     })
     expect(() => state.prepareSharedStateUpdate({}, exec)).toThrow('state_updates object')
     expect(() => state.prepareSharedStateUpdate({ state_updates: { value: 'x'.repeat(40) } }, exec))
@@ -618,9 +618,9 @@ describe('ThreadBinding shared state', () => {
     binding.liveAgent.session.append('step/end', { turn: 2, step: 1 })
     binding.liveAgent.session.append('step/start', { turn: 2, step: 2 })
     binding.liveAgent.session.append('tool/call', {
-      turn: 2, step: 2, callId: CallId('state-scalar-call'), name: 'ag_ui_update_state', arguments: '{}',
+      turn: 2, step: 2, callId: ToolCallId('state-scalar-call'), name: 'ag_ui_update_state', arguments: '{}',
     })
-    const scalarExec = { callId: CallId('state-scalar-call'), signal } as ToolRunContext
+    const scalarExec = { callId: ToolCallId('state-scalar-call'), signal } as ToolRunContext
     state.projection.sharedState = 'scalar'
     expect(JSON.parse(state.prepareSharedStateUpdate({ state_updates: { value: 3 } }, scalarExec)))
       .toMatchObject({ state: { value: 3 } })
@@ -666,16 +666,16 @@ describe('ThreadBinding defensive Tool execution', () => {
     controller.turn = 1
     controller.start()
     const signal = new AbortController().signal
-    const exec = { callId: CallId('private-call'), signal } as ToolRunContext
+    const exec = { callId: ToolCallId('private-call'), signal } as ToolRunContext
     expect(() => state.parkFrontendTool(TOOL.name, TOOL.parameters, { value: 'x' }, exec)).toThrow('no DSH call position')
     binding.liveAgent.session.append('turn/start', { turn: 1 })
     binding.liveAgent.session.append('step/start', { turn: 1, step: 1 })
     binding.liveAgent.session.append('tool/call', {
-      turn: 1, step: 1, callId: CallId('private-call'), name: 'different_tool', arguments: '{}',
+      turn: 1, step: 1, callId: ToolCallId('private-call'), name: 'different_tool', arguments: '{}',
     })
     expect(() => state.parkFrontendTool(TOOL.name, TOOL.parameters, { value: 'x' }, exec)).toThrow('no DSH call position')
     binding.liveAgent.session.append('tool/call', {
-      turn: 1, step: 1, callId: CallId('private-call'), name: TOOL.name, arguments: '{}',
+      turn: 1, step: 1, callId: ToolCallId('private-call'), name: TOOL.name, arguments: '{}',
     })
     controller.turn = 2
     expect(() => state.parkFrontendTool(TOOL.name, TOOL.parameters, { value: 'x' }, exec)).toThrow('no active AG-UI run')
@@ -698,22 +698,22 @@ describe('ThreadBinding defensive Tool execution', () => {
       step: 1,
       message: createAssistantMessage({
         content: [
-          { type: 'tool-call', id: CallId('multi-park-1'), name: TOOL.name, arguments: '{}' },
-          { type: 'tool-call', id: CallId('multi-park-2'), name: TOOL.name, arguments: '{}' },
+          { type: 'tool-call', id: ToolCallId('multi-park-1'), name: TOOL.name, arguments: '{}' },
+          { type: 'tool-call', id: ToolCallId('multi-park-2'), name: TOOL.name, arguments: '{}' },
         ],
         source: { provider: 'scripted', model: 'scripted' },
       }),
     }, { surfaceOp: 'append' })
     const signal = new AbortController().signal
-    session.append('tool/call', { turn: 1, step: 1, callId: CallId('multi-park-1'), name: TOOL.name, arguments: '{}' })
+    session.append('tool/call', { turn: 1, step: 1, callId: ToolCallId('multi-park-1'), name: TOOL.name, arguments: '{}' })
     void state.parkFrontendTool(TOOL.name, TOOL.parameters, { value: 'x' }, {
-      callId: CallId('multi-park-1'), signal,
+      callId: ToolCallId('multi-park-1'), signal,
     } as ToolRunContext).catch(() => {})
     expect(controller.record.state).toBe('active')
 
-    session.append('tool/call', { turn: 1, step: 1, callId: CallId('multi-park-2'), name: TOOL.name, arguments: '{}' })
+    session.append('tool/call', { turn: 1, step: 1, callId: ToolCallId('multi-park-2'), name: TOOL.name, arguments: '{}' })
     void state.parkFrontendTool(TOOL.name, TOOL.parameters, { value: 'x' }, {
-      callId: CallId('multi-park-2'), signal,
+      callId: ToolCallId('multi-park-2'), signal,
     } as ToolRunContext).catch(() => {})
     expect(controller.record.state).toBe('completed')
     expect(controller.record.events.at(-1)).toMatchObject({ type: EventType.RUN_FINISHED })
@@ -730,10 +730,10 @@ describe('ThreadBinding defensive Tool execution', () => {
     binding.liveAgent.session.append('turn/start', { turn: 1 })
     binding.liveAgent.session.append('step/start', { turn: 1, step: 1 })
     binding.liveAgent.session.append('tool/call', {
-      turn: 1, step: 1, callId: CallId('abort-call'), name: TOOL.name, arguments: '{}',
+      turn: 1, step: 1, callId: ToolCallId('abort-call'), name: TOOL.name, arguments: '{}',
     })
     const abort = new AbortController()
-    const parked = state.parkFrontendTool(TOOL.name, TOOL.parameters, { value: 'x' }, { callId: CallId('abort-call'), signal: abort.signal } as ToolRunContext)
+    const parked = state.parkFrontendTool(TOOL.name, TOOL.parameters, { value: 'x' }, { callId: ToolCallId('abort-call'), signal: abort.signal } as ToolRunContext)
     abort.abort()
     state.pendingCalls.get('abort-call')?.resolve('late')
     await expect(parked).rejects.toThrow('aborted')
@@ -799,12 +799,12 @@ describe('ThreadBinding session projection', () => {
     controller.turn = 1
     controller.start()
     const nested = createToolResultMessage({
-      callId: CallId('nested-result'),
+      callId: ToolCallId('nested-result'),
       isError: false,
       content: [{ type: 'text', text: 'nested text' }],
     }).content[0]
     const result = createToolResultMessage({
-      callId: CallId('server-result'),
+      callId: ToolCallId('server-result'),
       isError: false,
       content: [
         { type: 'text', text: 'plain text' },
@@ -819,13 +819,13 @@ describe('ThreadBinding session projection', () => {
             height: 1,
           },
         },
-        { type: 'tool-call', id: CallId('nested-call'), name: 'nested_tool', arguments: '{}' },
+        { type: 'tool-call', id: ToolCallId('nested-call'), name: 'nested_tool', arguments: '{}' },
         nested,
       ],
     })
     binding.liveAgent.session.append('turn/start', { turn: 1 })
     binding.liveAgent.session.append('step/start', { turn: 1, step: 1 })
-    binding.liveAgent.session.append('tool/call', { turn: 1, step: 1, callId: CallId('server-result'), name: 'backend_tool', arguments: '{}' })
+    binding.liveAgent.session.append('tool/call', { turn: 1, step: 1, callId: ToolCallId('server-result'), name: 'backend_tool', arguments: '{}' })
     binding.liveAgent.session.append('tool/result', { turn: 1, step: 1, message: result }, { surfaceOp: 'append' })
     binding.liveAgent.session.append('step/end', { turn: 1, step: 1 })
     binding.liveAgent.session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })

@@ -10,7 +10,7 @@ import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { disposeMountedContexts, expectLifecycleValid, mountGateway, runAgentEvents, toolViewEnvelopes } from './harness.ts'
 import { ScriptedAdapter, textResponse, toolCallsResponse } from './scripted-adapter.ts'
-import { mountTestSpine } from './spine.ts'
+import { mountTestAgentCore } from './agent-core.ts'
 import { durableSessionId } from '../src/session-id.ts'
 import { ThreadBinding, type ThreadOptions } from '../src/thread.ts'
 
@@ -191,7 +191,7 @@ describe('tool view cards survive a durable restart', () => {
 
     const first = new Context()
     contexts.push(first)
-    await mountTestSpine(first)
+    await mountTestAgentCore(first)
     first.tools.register(VIEW_TOOL)
     first.llm.registerAdapter(['scripted'], new ScriptedAdapter([
       toolCallsResponse([{ callId: 'view-call-1', name: 'view_probe', args: { subject: 'durable' } }]),
@@ -220,7 +220,7 @@ describe('tool view cards survive a durable restart', () => {
 
     const second = new Context()
     contexts.push(second)
-    await mountTestSpine(second)
+    await mountTestAgentCore(second)
     second.tools.register(VIEW_TOOL)
     second.llm.registerAdapter(['scripted'], new ScriptedAdapter([textResponse('Resumed answer.')]))
     await second.plugin(JsonlSessionPersistence, { root, compression: 'none' })
