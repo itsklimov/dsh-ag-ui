@@ -1,4 +1,4 @@
-import { CallId, LlmAdapter, type GenerateOptions, type LlmResolvedModelInfo, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, LlmAdapter, type GenerateOptions, type LlmResolvedModelInfo, type StreamChunk } from '@deepseek-ai/dsh-llm'
 
 /** One deterministic model outcome used by Gateway and Thread tests. */
 export type ScriptedResponse = StreamChunk[] | Error
@@ -46,11 +46,11 @@ export function toolCallsResponse(calls: ReadonlyArray<{ callId: string, name: s
     const encoded = JSON.stringify(call.args)
     chunks.push(
       { type: 'block-start', index, blockType: 'tool-call' },
-      { type: 'tool-call-delta', index, id: CallId(call.callId), name: call.name, argumentsDelta: encoded },
+      { type: 'tool-call-delta', index, id: ToolCallId(call.callId), name: call.name, argumentsDelta: encoded },
       {
         type: 'block-end',
         index,
-        block: { type: 'tool-call', id: CallId(call.callId), name: call.name, arguments: encoded },
+        block: { type: 'tool-call', id: ToolCallId(call.callId), name: call.name, arguments: encoded },
       },
     )
   }

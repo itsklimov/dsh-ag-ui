@@ -11,7 +11,7 @@ import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { expect } from 'vitest'
 import AgUiGateway, { TOOL_VIEW_NAME } from 'dsh-ag-ui'
 import { ScriptedAdapter } from './scripted-adapter.ts'
-import { mountTestSpine } from './spine.ts'
+import { mountTestAgentCore } from './agent-core.ts'
 
 /** Shared plumbing for specs that drive a real host through the official client. */
 
@@ -105,7 +105,7 @@ export interface MountedGateway {
 }
 
 export interface GatewayMountOptions {
-  /** Persona forwarded to the test spine; omitted uses the spine default. */
+  /** Persona forwarded to the test Agent core; omitted uses the helper default. */
   readonly persona?: string
   /** Backend tools registered before the scripted model adapter. */
   readonly tools?: readonly ToolDefinition[]
@@ -113,7 +113,7 @@ export interface GatewayMountOptions {
   readonly limits?: { maxRunEvents: number, maxRunEventBytes: number }
 }
 
-/** Mount one loopback WebServer, test spine, scripted model, and Gateway. */
+/** Mount one loopback WebServer, test Agent core, scripted model, and Gateway. */
 export async function mountGateway(
   script: StreamChunk[][],
   secret: string,
@@ -122,7 +122,7 @@ export async function mountGateway(
   const ctx = new Context()
   mounted.push(ctx)
   await ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 })
-  await mountTestSpine(ctx, options.persona)
+  await mountTestAgentCore(ctx, options.persona)
   for (const tool of options.tools ?? []) ctx.tools.register(tool)
   const adapter = new ScriptedAdapter(script)
   ctx.llm.registerAdapter(['scripted'], adapter)

@@ -1,13 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import {
   BrowserToolBroker,
   type BrowserToolDescriptor,
 } from '../src/browser-tools.ts'
-import { mountTestSpine } from './spine.ts'
+import { mountTestAgentCore } from './agent-core.ts'
 
 const contexts: Context[] = []
 
@@ -30,7 +30,7 @@ const TOOL: BrowserToolDescriptor = {
 async function mount() {
   const ctx = new Context()
   contexts.push(ctx)
-  await mountTestSpine(ctx)
+  await mountTestAgentCore(ctx)
   const handle = await ctx.agents.create({
     sessionId: SessionId('browser-tool-broker-spec'),
   })
@@ -45,7 +45,7 @@ function execution(
   agent: Awaited<ReturnType<typeof mount>>['agent'],
   signal = new AbortController().signal,
 ): ToolRunContext {
-  const callId = CallId('browser-tool-call')
+  const callId = ToolCallId('browser-tool-call')
   return {
     agent,
     arguments: { detail: 'summary' },

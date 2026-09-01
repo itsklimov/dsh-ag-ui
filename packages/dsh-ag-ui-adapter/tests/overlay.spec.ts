@@ -27,12 +27,12 @@ describe('overlayRows', () => {
   it('places caller plugins between the webserver and the gateway, defaulting their ids', () => {
     const rows = overlayRows(inputs({
       plugins: [
-        { id: 'agent-spine', name: 'file:///spine.js', config: { persona: 'Test persona.' } },
+        { id: 'agent-core', name: 'file:///agent-core.js', config: { persona: 'Test persona.' } },
         { name: 'file:///model.js' },
       ],
     }))
-    expect(rows.map(row => row.id)).toEqual(['webserver', 'agent-spine', 'plugin-2', 'ag-ui', 'adapter-reporter'])
-    expect(rows[1]).toEqual({ id: 'agent-spine', name: 'file:///spine.js', config: { persona: 'Test persona.' } })
+    expect(rows.map(row => row.id)).toEqual(['webserver', 'agent-core', 'plugin-2', 'ag-ui', 'adapter-reporter'])
+    expect(rows[1]).toEqual({ id: 'agent-core', name: 'file:///agent-core.js', config: { persona: 'Test persona.' } })
     expect(rows[2]).toEqual({ id: 'plugin-2', name: 'file:///model.js' })
   })
 
@@ -75,7 +75,7 @@ describe('overlayRows', () => {
 
   it('keeps every row JSON-serializable for the generated cordis.yml', () => {
     const rows = overlayRows(inputs({
-      plugins: [{ id: 'agent-spine', name: 'file:///spine.js', config: { count: 1, nested: { ok: true } } }],
+      plugins: [{ id: 'agent-core', name: 'file:///agent-core.js', config: { count: 1, nested: { ok: true } } }],
     }))
     expect(JSON.parse(JSON.stringify(rows))).toEqual(rows)
   })

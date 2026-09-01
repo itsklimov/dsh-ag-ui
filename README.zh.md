@@ -147,7 +147,7 @@ Browser                                    Node.js 应用
        identity headers                           - 环回 webserver，临时端口
   -> POST /ag-ui 到 Host                         - 同一个已发布的 dsh-ag-ui
   -> dsh-ag-ui Host Service                        gateway row，按进程 secret
-  -> DSH Agent / Session / Tool runtime          - 应用自己的 spine 与
+  -> DSH Agent / Session / Tool runtime          - 应用自己的 Agent 核心与
   -> model provider 与 backend Tools                model plugin rows
                                             -> run() 经环回 HTTP 访问同一个
                                                gateway service
@@ -298,7 +298,7 @@ Upstream Dojo 的 integration registry 是静态源码，目前没有 `deepseek-
 
 ## 嵌入适配器
 
-独立的 [`dsh-ag-ui-adapter`](packages/dsh-ag-ui-adapter) 包是本部署形态网关的嵌入形态对应物。`DshAgent`（`AbstractAgent` 子类）spawn 一个 DSH 微型 Host 子进程——由 Cordis overlay 组合环回 webserver（临时端口）、本网关（按进程生成的 secret）以及调用方的 agent spine 与 model rows——并通过环回 HTTP 以官方 client 原语实现 `run()`，不新增任何协议翻译代码。Host 在首次 run 时才惰性启动，可按空闲窗口自动关闭，且绝不会比宿主进程活得更久。用法、plugin row 解析、环境变量回退、生命周期与嵌入形态的信任姿态见其 README。
+独立的 [`dsh-ag-ui-adapter`](packages/dsh-ag-ui-adapter) 包是本部署形态网关的嵌入形态对应物。`DshAgent`（`AbstractAgent` 子类）spawn 一个 DSH 微型 Host 子进程——由 Cordis overlay 组合环回 webserver（临时端口）、本网关（按进程生成的 secret）以及调用方显式提供的 Agent 核心与 model rows——并通过环回 HTTP 以官方 client 原语实现 `run()`，不新增任何协议翻译代码。Host 在首次 run 时才惰性启动，可按空闲窗口自动关闭，且绝不会比宿主进程活得更久。用法、plugin row 解析、环境变量回退、生命周期与嵌入形态的信任姿态见其 README。
 
 ## HTTP 与 run 语义
 
@@ -358,7 +358,7 @@ Backend Tool result 会发出 `TOOL_CALL_RESULT`。Frontend Tool result 不在 A
 | --- | --- |
 | AG-UI core/client/encoder | `>=0.0.58 <0.1.0`（`~0.0.58`；已用 `0.0.58` 验证） |
 | Node.js | `^22.19.0` 或 `>=24.0.0` |
-| DeepSeek Harness | `peerDependencies` 中列出的 developer preview packages |
+| DeepSeek Harness | `0.1.2-alpha.3`（精确的 developer-preview peers） |
 
 DSH 仍处于 developer preview，可能引入 breaking changes。在这些 API 稳定前，本 package 使用精确 DSH peer versions。
 

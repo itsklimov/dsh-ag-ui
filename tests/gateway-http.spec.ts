@@ -4,7 +4,7 @@ import type { RunAgentInput, Tool } from '@ag-ui/core'
 import { Context } from '@deepseek-ai/cordis'
 import WebServer from '@deepseek-ai/dsh-host-webserver'
 import { ScriptedAdapter, type ScriptedResponse, textResponse } from './scripted-adapter.ts'
-import { mountTestSpine } from './spine.ts'
+import { mountTestAgentCore } from './agent-core.ts'
 import AgUiGateway, { type Config } from 'dsh-ag-ui'
 import { SessionId } from '@deepseek-ai/dsh-session'
 
@@ -29,7 +29,7 @@ async function mount(
   const ctx = new Context()
   contexts.push(ctx)
   await ctx.plugin(WebServer, { host, port: 0 })
-  await mountTestSpine(ctx)
+  await mountTestAgentCore(ctx)
   ctx.llm.registerAdapter(['scripted'], new ScriptedAdapter(script))
   const gateway = await ctx.plugin(AgUiGateway, {
     provider: 'scripted',

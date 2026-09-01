@@ -147,7 +147,7 @@ Browser                                   Node.js application
        identity headers                         - loopback webserver, ephemeral port
   -> POST /ag-ui on the Host                    - the same published dsh-ag-ui
   -> dsh-ag-ui Host Service                       gateway row, per-process secret
-  -> DSH Agent / Session / Tool runtime         - the application's spine and
+  -> DSH Agent / Session / Tool runtime         - the application's Agent core and
   -> model provider and backend Tools              model plugin rows
                                              -> run() over loopback HTTP to the
                                                 same gateway service
@@ -298,7 +298,7 @@ If the inline player does not render on this host, download [docs/demo/dojo-shar
 
 ## Embedded adapter
 
-The separate [`dsh-ag-ui-adapter`](packages/dsh-ag-ui-adapter) package is the embedded counterpart of this deployment-form Gateway. A `DshAgent` (`AbstractAgent` subclass) spawns a DSH micro-host child — a Cordis overlay composing the loopback webserver on an ephemeral port, this Gateway with a per-process generated secret, and the caller's agent-spine and model rows — and passes `run()` through loopback HTTP using the official client primitives, adding no protocol translation code. The host starts lazily on the first run, can idle-shut-down, and never outlives the embedding process. See its README for usage, plugin row resolution, environment fallback, lifecycle, and the trust posture of the embedded shape.
+The separate [`dsh-ag-ui-adapter`](packages/dsh-ag-ui-adapter) package is the embedded counterpart of this deployment-form Gateway. A `DshAgent` (`AbstractAgent` subclass) spawns a DSH micro-host child — a Cordis overlay composing the loopback webserver on an ephemeral port, this Gateway with a per-process generated secret, and the caller's explicit Agent-core and model rows — and passes `run()` through loopback HTTP using the official client primitives, adding no protocol translation code. The host starts lazily on the first run, can idle-shut-down, and never outlives the embedding process. See its README for usage, plugin row resolution, environment fallback, lifecycle, and the trust posture of the embedded shape.
 
 ## HTTP and run semantics
 
@@ -358,7 +358,7 @@ An unexpected HTTP disconnect cancels the Gateway-owned DSH turn. `HttpAgent` do
 | --- | --- |
 | AG-UI core/client/encoder | `>=0.0.58 <0.1.0` (`~0.0.58`; tested with `0.0.58`) |
 | Node.js | `^22.19.0` or `>=24.0.0` |
-| DeepSeek Harness | Developer preview packages listed in `peerDependencies` |
+| DeepSeek Harness | `0.1.2-alpha.3` (exact developer-preview peers) |
 
 DSH is in developer preview and can introduce breaking changes. This package uses exact DSH peer versions until those APIs stabilize.
 

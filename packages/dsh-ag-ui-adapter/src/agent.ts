@@ -25,7 +25,7 @@ export interface DshAgentConfig extends AgentConfig {
    * `DSH_AG_UI_ADAPTER_MODEL`.
    */
   readonly gateway?: DshGatewayOptions | undefined
-  /** Extra overlay rows between the webserver and the gateway (spine, model). */
+  /** Extra overlay rows between the webserver and the gateway (Agent core, model). */
   readonly plugins?: readonly HostPluginRow[] | undefined
   /** Trusted tenant identity sent to the gateway; default `dsh-ag-ui-adapter`. */
   readonly tenantId?: string | undefined

@@ -2,19 +2,23 @@ import type { HostPluginRow } from '../src/types.ts'
 
 /** Shared overlay rows for the specs that spawn a real micro-host. */
 
-export const SPINE_ROW: HostPluginRow = {
-  id: 'agent-spine',
-  name: '@deepseek-ai/dsh-agent-spine-demo',
-  config: {
-    workspaceContext: false,
-    skills: { enabled: false },
-    toolBash: false,
-    toolJobs: false,
-    includeHarnessIdentity: false,
-    includeRuntimeContext: false,
-    persona: 'You are the deterministic DSH AG-UI adapter test assistant.',
+export const AGENT_CORE_ROWS: readonly HostPluginRow[] = [
+  { id: 'llm', name: '@deepseek-ai/dsh-llm' },
+  { id: 'session', name: '@deepseek-ai/dsh-session' },
+  { id: 'session-projection', name: '@deepseek-ai/dsh-session-projection' },
+  {
+    id: 'system-prompt',
+    name: '@deepseek-ai/dsh-system-prompt',
+    config: {
+      includeHarnessIdentity: false,
+      includeRuntimeContext: false,
+      persona: 'You are the deterministic DSH AG-UI adapter test assistant.',
+    },
   },
-}
+  { id: 'tools', name: '@deepseek-ai/dsh-tools' },
+  { id: 'agent', name: '@deepseek-ai/dsh-agent' },
+  { id: 'agent-loop', name: '@deepseek-ai/dsh-agent-loop', config: { agents: [] } },
+]
 
 export const SCRIPTED_MODEL_ROW: HostPluginRow = {
   id: 'scripted-model',

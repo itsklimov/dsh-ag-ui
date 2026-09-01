@@ -3,13 +3,13 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { MicroHost } from '../src/host.ts'
 import type { MicroHostOptions } from '../src/host.ts'
-import { BROKEN_NODE_ENV, SCRIPTED_MODEL_ROW, SIGTERM_SHIELD_ROW, SPINE_ROW } from './rows.ts'
+import { AGENT_CORE_ROWS, BROKEN_NODE_ENV, SCRIPTED_MODEL_ROW, SIGTERM_SHIELD_ROW } from './rows.ts'
 
 /** The process manager against a real spawned micro-host. */
 
 const SCRIPTED: MicroHostOptions = {
   gateway: { provider: 'scripted', model: 'scripted' },
-  plugins: [SPINE_ROW, SCRIPTED_MODEL_ROW],
+  plugins: [...AGENT_CORE_ROWS, SCRIPTED_MODEL_ROW],
 }
 
 const live: MicroHost[] = []
@@ -45,7 +45,7 @@ describe('MicroHost', () => {
   })
 
   it('times out when the composed host can never activate, and kills the child', async () => {
-    // without an agent spine (or any plugin row) the gateway waits for the agents service forever
+    // without the Agent core (or any plugin row) the gateway waits for the agents service forever
     await expect(MicroHost.start({
       gateway: { provider: 'scripted', model: 'scripted' },
       readyTimeoutMs: 500,

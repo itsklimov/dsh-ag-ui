@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { EventType, type BaseEvent } from '@ag-ui/core'
-import { CallId, createAssistantMessage, createToolResultMessage } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, createAssistantMessage, createToolResultMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { durableUserId, SessionProjection, STATE_TOOL_NAME, type ToolCallLifecycle } from '../src/projection.ts'
@@ -43,7 +43,7 @@ function textMessage(text: string): SessionEvent {
 }
 
 function toolCall(callId: string, name: string): SessionEvent {
-  return event('tool/call', { turn: 1, step: 1, callId: CallId(callId), name, arguments: '{"x":1}' })
+  return event('tool/call', { turn: 1, step: 1, callId: ToolCallId(callId), name, arguments: '{"x":1}' })
 }
 
 /** One assistant message announcing several tool calls in a single step. */
@@ -54,7 +54,7 @@ function assistantToolAnnouncement(turn: number, count: number): SessionEvent {
     message: createAssistantMessage({
       content: Array.from({ length: count }, (_, index) => ({
         type: 'tool-call',
-        id: CallId(`announced-${String(index)}`),
+        id: ToolCallId(`announced-${String(index)}`),
         name: 'ui_action',
         arguments: '{}',
       })),
@@ -68,7 +68,7 @@ function toolResult(callId: string, isError = false): SessionEvent {
     turn: 1,
     step: 1,
     message: createToolResultMessage({
-      callId: CallId(callId),
+      callId: ToolCallId(callId),
       isError,
       content: [{ type: 'text', text: `result of ${callId}` }],
     }),
@@ -207,7 +207,7 @@ describe('SessionProjection tool view cards', () => {
   it('carries the declared call and result intents, including the durable meta', () => {
     const projection = new SessionProjection(sessionId, declaring)
     const call = projection.project(event('tool/call', {
-      turn: 1, step: 1, callId: CallId('view-1'), name: 'view_tool', arguments: '{"subject":"files"}',
+      turn: 1, step: 1, callId: ToolCallId('view-1'), name: 'view_tool', arguments: '{"subject":"files"}',
     }), 1)
     expect(call.events.at(-1)).toMatchObject({
       type: EventType.CUSTOM,
@@ -223,7 +223,7 @@ describe('SessionProjection tool view cards', () => {
     const result = projection.project(event('tool/result', {
       turn: 1,
       step: 1,
-      message: createToolResultMessage({ callId: CallId('view-1'), content: [{ type: 'text', text: 'raw' }] }),
+      message: createToolResultMessage({ callId: ToolCallId('view-1'), content: [{ type: 'text', text: 'raw' }] }),
       meta: { kept: true },
     }), 1)
     expect(result.events.at(-1)).toMatchObject({
@@ -250,14 +250,14 @@ describe('SessionProjection tool view cards', () => {
     }
     const projection = new SessionProjection(sessionId, throwing)
     const malformed = projection.project(event('tool/call', {
-      turn: 1, step: 1, callId: CallId('bad-args'), name: 'throwing', arguments: '{oops',
+      turn: 1, step: 1, callId: ToolCallId('bad-args'), name: 'throwing', arguments: '{oops',
     }), 1)
     expect(malformed.events.at(-1)).toMatchObject({
       type: EventType.CUSTOM,
       value: { phase: 'call', card: { card: 'generic', title: 'throwing', rawInput: '{oops' } },
     })
     const silent = projection.project(event('tool/call', {
-      turn: 1, step: 1, callId: CallId('silent-1'), name: 'silent', arguments: '{}',
+      turn: 1, step: 1, callId: ToolCallId('silent-1'), name: 'silent', arguments: '{}',
     }), 1)
     expect(trailingEnvelope(silent.events).card).toEqual({ card: 'generic', title: 'silent', rawInput: {} })
 
@@ -286,12 +286,12 @@ describe('SessionProjection tool view cards', () => {
     const projection = new SessionProjection(sessionId, declaring)
     const log = [
       event('tool/call', {
-        turn: 1, step: 1, callId: CallId('view-1'), name: 'view_tool', arguments: '{"subject":"files"}',
+        turn: 1, step: 1, callId: ToolCallId('view-1'), name: 'view_tool', arguments: '{"subject":"files"}',
       }),
       event('tool/result', {
         turn: 1,
         step: 1,
-        message: createToolResultMessage({ callId: CallId('view-1'), content: [{ type: 'text', text: 'raw' }] }),
+        message: createToolResultMessage({ callId: ToolCallId('view-1'), content: [{ type: 'text', text: 'raw' }] }),
         meta: { kept: true },
       }),
       toolCall('state-1', STATE_TOOL_NAME),
@@ -413,7 +413,7 @@ describe('SessionProjection run outcomes', () => {
   it('ignores events outside the active turn and releases step slots at step end', () => {
     const projection = new SessionProjection(sessionId, presenter)
     const nextTurnCall = event('tool/call', {
-      turn: 2, step: 1, callId: CallId('other-turn'), name: 'backend_tool', arguments: '{}',
+      turn: 2, step: 1, callId: ToolCallId('other-turn'), name: 'backend_tool', arguments: '{}',
     })
     expect(projection.project(nextTurnCall, 1).events).toEqual([])
     expect(projection.project(nextTurnCall, undefined).events).toEqual([])
@@ -474,7 +474,7 @@ describe('SessionProjection run outcomes', () => {
     projection.markParked('turn-1-park', backendLifecycle(projection, 'turn-1-park'))
     projection.project(assistantToolAnnouncement(2, 1), 2)
     projection.project(event('tool/call', {
-      turn: 2, step: 1, callId: CallId('turn-2-park'), name: 'ui_action', arguments: '{}',
+      turn: 2, step: 1, callId: ToolCallId('turn-2-park'), name: 'ui_action', arguments: '{}',
     }), 2)
     projection.markParked('turn-2-park', backendLifecycle(projection, 'turn-2-park'))
     projection.clearTurn(1)
@@ -486,7 +486,7 @@ describe('SessionProjection run outcomes', () => {
     const projection = new SessionProjection(sessionId, presenter)
     projection.project(toolCall('turn-1-call', 'backend_tool'), 1)
     projection.project(event('tool/call', {
-      turn: 2, step: 1, callId: CallId('turn-2-call'), name: 'backend_tool', arguments: '{}',
+      turn: 2, step: 1, callId: ToolCallId('turn-2-call'), name: 'backend_tool', arguments: '{}',
     }), 2)
     projection.clearTurn(1)
     expect(projection.lifecycleOf('turn-1-call')).toBeUndefined()

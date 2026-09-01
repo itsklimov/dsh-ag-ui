@@ -3,7 +3,7 @@
 /**
  * One caller-supplied row of the generated micro-host overlay, appended in
  * order between the webserver and the gateway. This is where an embedding
- * application composes its agent spine and model adapter.
+ * application composes its Agent core and model adapter.
  */
 export interface HostPluginRow {
   /** Stable entry id inside the overlay; defaults to `plugin-<index>`. */

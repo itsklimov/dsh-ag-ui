@@ -1,4 +1,4 @@
-import { CallId, LlmAdapter } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, LlmAdapter } from '@deepseek-ai/dsh-llm'
 
 /**
  * Stateless content-keyed scripted model for the durable fixture: every
@@ -19,8 +19,8 @@ function toolCall(id, name, args) {
   const encoded = JSON.stringify(args)
   return [
     { type: 'block-start', index: 0, blockType: 'tool-call' },
-    { type: 'tool-call-delta', index: 0, id: CallId(id), name, argumentsDelta: encoded },
-    { type: 'block-end', index: 0, block: { type: 'tool-call', id: CallId(id), name, arguments: encoded } },
+    { type: 'tool-call-delta', index: 0, id: ToolCallId(id), name, argumentsDelta: encoded },
+    { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId(id), name, arguments: encoded } },
     { type: 'finish', reason: { kind: 'tool-calls' } },
   ]
 }
