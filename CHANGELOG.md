@@ -16,6 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Runs of one thread now queue in arrival order behind the active run instead of failing with `RUN_IN_PROGRESS`; a waiting client that disconnects is never admitted.
 - Browser Tool names now accept standard AG-UI-compatible ASCII identifiers while reserving the internal state Tool name.
 - Consolidated internal Tool-call and Run-event bookkeeping and removed redundant source fixtures without changing protocol behavior.
 - Upgraded the exact DeepSeek Harness compatibility target to `0.1.2-alpha.3` and replaced the removed composition package with supported explicit Agent-core rows.

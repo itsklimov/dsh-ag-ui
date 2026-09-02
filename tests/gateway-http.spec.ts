@@ -105,6 +105,29 @@ async function post(url: string, value: unknown, headers: Record<string, string>
   return result
 }
 
+/** Start one run over a raw socket so a test can order requests, observe the run start, and drop the client. */
+function postStreaming(url: string, value: RunAgentInput) {
+  const started = Promise.withResolvers<void>()
+  const { promise, resolve, reject } = Promise.withResolvers<{ status: number; body: string }>()
+  promise.catch(() => {})
+  const request = httpRequest(url, {
+    method: 'POST',
+    headers: { ...HEADERS, 'content-type': 'application/json' },
+  }, (response) => {
+    started.resolve()
+    const body: Buffer[] = []
+    response.on('data', (chunk: Buffer) => { body.push(chunk) })
+    response.on('end', () => { resolve({ status: response.statusCode ?? 0, body: Buffer.concat(body).toString() }) })
+  })
+  request.on('error', reject)
+  request.end(JSON.stringify(value))
+  return { started: started.promise, result: () => promise, abort: () => { request.destroy() } }
+}
+
+function secondRun(): RunAgentInput {
+  return input({ runId: 'run-2', messages: [{ id: 'message-2', role: 'user', content: 'second' }] })
+}
+
 function expectCode(result: { status: number; body: string }, status: number, code: string): void {
   expect(result.status).toBe(status)
   expect(JSON.parse(result.body)).toMatchObject({ code })
@@ -271,18 +294,55 @@ describe('AG-UI gateway lifecycle', () => {
     expect(result.body).toContain('"parentRunId":"parent-1"')
   })
 
-  it('shares one pending thread creation across concurrent requests', async () => {
+  it('serves the runs of one thread in arrival order', async () => {
     const gate = Promise.withResolvers<StreamChunk[]>()
-    const { ctx, url } = await mount({}, [gate.promise])
-    const requests = [post(url, input()), post(url, input())]
-    const rejected = await Promise.race(requests)
-    expect(rejected.status).toBe(409)
-    expect(rejected.body).toContain('RUN_IN_PROGRESS')
-    gate.resolve(textResponse('one'))
-    const results = await Promise.all(requests)
-    expect(results.map(result => result.status).sort()).toEqual([200, 409])
-    expect(results.find(result => result.status === 200)?.body).toContain('one')
+    const { ctx, url } = await mount({}, [gate.promise, textResponse('second-reply')])
+    const debug = vi.spyOn(ctx.logger, 'debug')
+    const first = postStreaming(url, input())
+    await first.started
+    const second = post(url, secondRun())
+    await vi.waitFor(() => { expect(debug).toHaveBeenCalledWith(expect.stringContaining('run-2 waits for the active run')) })
+    gate.resolve(textResponse('first-reply'))
+    const results = await Promise.all([first.result(), second])
+    expect(results.map(result => result.status)).toEqual([200, 200])
+    expect(results[0].body).toContain('first-reply')
+    // the queued run opened after the first reply was durable, so its snapshot already carries it
+    expect(results[1].body).toContain('first-reply')
+    expect(results[1].body).toContain('second-reply')
     expect(ctx.agents.list()).toHaveLength(1)
+  })
+
+  it('never admits a queued run whose client left before its turn', async () => {
+    const gate = Promise.withResolvers<StreamChunk[]>()
+    const { ctx, url } = await mount({}, [gate.promise, textResponse('third-reply')])
+    const debug = vi.spyOn(ctx.logger, 'debug')
+    const first = postStreaming(url, input())
+    await first.started
+    const second = postStreaming(url, secondRun())
+    await vi.waitFor(() => { expect(debug).toHaveBeenCalledWith(expect.stringContaining('run-2 waits for the active run')) })
+    second.abort()
+    await vi.waitFor(() => { expect(debug).toHaveBeenCalledWith(expect.stringContaining('run-2 left the queue')) })
+    gate.resolve(textResponse('first-reply'))
+    expect((await first.result()).status).toBe(200)
+    const third = await post(url, input({ runId: 'run-3', messages: [{ id: 'message-3', role: 'user', content: 'third' }] }))
+    expect(third.status).toBe(200)
+    expect(third.body).toContain('third-reply')
+    expect(third.body).not.toContain('second')
+  })
+
+  it('waits for a cancelled turn to settle before admitting the next run', async () => {
+    const gate = Promise.withResolvers<StreamChunk[]>()
+    const { ctx, url } = await mount({}, [gate.promise, textResponse('second-reply')])
+    const debug = vi.spyOn(ctx.logger, 'debug')
+    const first = postStreaming(url, input())
+    await first.started
+    first.abort()
+    const second = post(url, secondRun())
+    await vi.waitFor(() => { expect(debug).toHaveBeenCalledWith(expect.stringContaining('run-2 waits for the Agent')) })
+    gate.resolve(textResponse('first-reply'))
+    const result = await second
+    expect(result.status).toBe(200)
+    expect(result.body).toContain('second-reply')
   })
 
   it('returns backend errors as streamed run failures', async () => {

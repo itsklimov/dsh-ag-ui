@@ -17,7 +17,7 @@ import { AgUiGatewayError, publicError } from './errors.ts'
 import { createFileRoute } from './files.ts'
 import { jsonBytes, jsonDepth, requestDigest, utf8Bytes } from './json.ts'
 import { agentPresetsOf } from './presets.ts'
-import { replayRun } from './run.ts'
+import { replayRun, type RunController } from './run.ts'
 import { durableSessionId } from './session-id.ts'
 import { ThreadBinding, type ThreadOptions } from './thread.ts'
 import type { AgUiAgentLookup, AgUiPrincipal, AgUiThreadIdentity } from './types.ts'
@@ -234,7 +234,7 @@ export class AgUiGateway extends Service implements AgUiAgentLookup {
         await replayRun(response, prior)
         return
       }
-      const controller = binding.reserveRun(input, digest)
+      const controller = await this.admitRun(binding, input, digest, response)
       /* v8 ignore next -- normal response close is covered; abnormal ownership is tested through Binding.disconnect. */
       const onClose = (): void => {
         /* v8 ignore next -- abnormal close is covered at the Binding boundary; normal end is already writableEnded. */
@@ -252,6 +252,24 @@ export class AgUiGateway extends Service implements AgUiAgentLookup {
     } catch (error) {
       this.respondError(response, publicError(error))
     }
+  }
+
+  /** Queue behind the thread's active run, then reserve; a client that leaves the queue is not admitted. */
+  private async admitRun(
+    binding: ThreadBinding,
+    input: RunAgentInput,
+    digest: string,
+    response: ServerResponse,
+  ): Promise<RunController> {
+    const gone = new AbortController()
+    const onClose = (): void => { gone.abort() }
+    response.once('close', onClose)
+    try {
+      await binding.awaitTurn(input.runId, gone.signal)
+    } finally {
+      response.off('close', onClose)
+    }
+    return binding.reserveRun(input, digest)
   }
 
   private authenticate(request: IncomingMessage): AgUiPrincipal {

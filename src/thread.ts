@@ -293,7 +293,35 @@ export class ThreadBinding {
   }
 
   /**
-   * Reserve one run before accepting DSH input.
+   * Wait until this thread can admit another run, so runs of one thread follow each
+   * other in arrival order instead of failing while an earlier run is still active.
+   * @param signal - aborted once the waiting client is gone; that run is never admitted.
+   */
+  async awaitTurn(runId: string, signal: AbortSignal): Promise<void> {
+    const session = String(this.sessionId)
+    const left = new Promise<never>((_resolve, reject) => {
+      signal.addEventListener('abort', () => {
+        this.ctx.logger.debug(`ag-ui: run ${runId} left the queue of session ${session}`)
+        reject(new AgUiGatewayError('CLIENT_DISCONNECTED', 'The AG-UI client left before its queued run started.', 409))
+      }, { once: true })
+    })
+    left.catch(() => {})
+    for (;;) {
+      if (this.activeRun !== undefined) {
+        this.ctx.logger.debug(`ag-ui: run ${runId} waits for the active run of session ${session}`)
+        await Promise.race([this.activeRun.done, left])
+      } else if (this.pendingCalls.size === 0 && this.liveAgent.status !== 'idle') {
+        // a settled run may leave its finishing or cancelled turn converging; parked calls keep a turn open on purpose
+        this.ctx.logger.debug(`ag-ui: run ${runId} waits for the Agent of session ${session} to settle`)
+        await Promise.race([this.liveAgent.whenIdle(), left])
+      } else {
+        return
+      }
+    }
+  }
+
+  /**
+   * Reserve one run before accepting DSH input; callers serialize through {@link awaitTurn} first.
    * @param input - validated AG-UI request.
    * @param digest - exact request-body digest.
    * @returns the sole active controller for this thread.
