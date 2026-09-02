@@ -140,7 +140,7 @@ lease.dispose()
 
 可信 BFF 可以在 run 前把文件流式写入该目录。`POST <path>/threads/<threadId>/files` 接收 raw body、`content-length`、可选的 `content-type`，以及 `x-file-name` 中 percent-encoded UTF-8 文件名。`GET <path>/threads/<threadId>/files/<name>` 从已有的认证 thread binding 下载文件。两个 route 与 run route 使用相同的 bearer secret 和 identity headers。
 
-User message 支持有序的 AG-UI content parts。Text part 保持为文本。URL part 必须引用当前 thread `uploads` 目录中的 `<prefix>/threads/<threadId>/files/<encodeURIComponent(name)>`。Host 提供 attachment storage 时，图片会成为原生 DSH image block；其他上传文件会成为 `Attached file: uploads/<name> (...)` 文本，Agent 可从 workspace 打开它们。Inline data 仅支持四种图片 media type。
+User message 支持有序的 AG-UI content parts。Text part 保持为文本。URL part 必须引用当前 thread `uploads` 目录中的 `<prefix>/threads/<threadId>/files/<encodeURIComponent(name)>`。Host 提供 attachment storage 时，图片会成为原生 DSH image block；其他上传文件会成为 `Attached file: uploads/<name> (...)` 文本，Agent 可从 workspace 打开它们。不接受 inline data part；请先把文件上传到 thread，再通过 URL 引用。`MESSAGES_SNAPSHOT` 返回的 user message 与客户端发送的 parts 完全一致，因此回传 snapshot 的客户端保持相同的 message digest。
 
 `maxRunEvents` 必须至少容纳 mandatory opening 与 terminal events。`maxRunEventBytes` 会限制包含 `RUN_STARTED` 和 terminal event 在内的完整 retained Run record，并且必须足以容纳已配置的最大 identity length。非 loopback DSH WebServer 需要设置 `allowNonLoopback: true`。推荐把 Gateway 保持在 loopback，并放在同 Host 的 authenticated BFF 后面。
 

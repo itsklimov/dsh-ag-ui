@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
-- Ordered AG-UI user content parts with workspace file references and native image admission.
+- Ordered AG-UI user content parts with workspace file references and native image admission; `MESSAGES_SNAPSHOT` returns the accepted parts unchanged, and inline data parts are rejected in favor of thread uploads.
 - Deterministic per-thread workspaces with DSH Web workspace registration when the Host provides it.
 - Authenticated streaming upload and download routes for per-thread workspace files.
 - Bidirectional shared state with `STATE_SNAPSHOT` and the reserved `ag_ui_update_state` Tool.

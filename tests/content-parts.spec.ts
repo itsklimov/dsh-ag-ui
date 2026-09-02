@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { type InputContent, type RunAgentInput } from '@ag-ui/core'
+import { EventType, type InputContent, type MessagesSnapshotEvent, type RunAgentInput } from '@ag-ui/core'
 import { Context } from '@deepseek-ai/cordis'
 import {
   AttachmentError,
@@ -83,7 +83,7 @@ async function mount(
   const ctx = new Context()
   contexts.push(ctx)
   await mountTestAgentCore(ctx)
-  ctx.llm.registerAdapter(['scripted'], new ScriptedAdapter([textResponse('ok')]))
+  ctx.llm.registerAdapter(['scripted'], new ScriptedAdapter([textResponse('ok'), textResponse('ok'), textResponse('ok')]))
   if (attachments !== undefined) ctx.provide('attachments', attachments.store)
   const workspaceRoot = await mkdtemp(join(tmpdir(), 'ag-ui-content-parts-'))
   workspaceRoots.push(workspaceRoot)
@@ -157,17 +157,6 @@ describe('AG-UI user content parts', () => {
     }])
   })
 
-  it('admits inline image data without reading the workspace', async () => {
-    const attachments = fakeAttachments()
-    const { binding } = await mount(attachments)
-    await drive(binding, 'image-data', 'image-data-message', [
-      { type: 'image', source: { type: 'data', value: PNG.toString('base64'), mimeType: 'image/png' } },
-    ])
-    expect(Buffer.from(attachments.saved[0]?.[0]?.data ?? [])).toEqual(PNG)
-    expect(attachments.saved[0]?.[0]?.name).toBeUndefined()
-    expect(loggedUsers(binding).at(-1)?.content[0]?.type).toBe('image')
-  })
-
   it('treats a URL part with an image media type as a native image', async () => {
     const attachments = fakeAttachments()
     const { binding } = await mount(attachments)
@@ -217,9 +206,8 @@ describe('AG-UI user content parts', () => {
   })
 
   it.each([
-    ['document data', [{ type: 'document', source: { type: 'data', value: 'YQ==', mimeType: 'text/plain' } }], 'UNSUPPORTED_CONTENT_PART'],
+    ['inline data', [{ type: 'image', source: { type: 'data', value: PNG.toString('base64'), mimeType: 'image/png' } }], 'UNSUPPORTED_CONTENT_PART'],
     ['binary data', [{ type: 'binary', mimeType: 'application/octet-stream', data: 'YQ==' }], 'UNSUPPORTED_CONTENT_PART'],
-    ['image data media type', [{ type: 'image', source: { type: 'data', value: 'YQ==', mimeType: 'image/bmp' } }], 'UNSUPPORTED_MEDIA_TYPE'],
     ['image URL media type', [{ type: 'image', source: { type: 'url', value: fileUrl('image.bmp'), mimeType: 'image/bmp' } }], 'UNSUPPORTED_MEDIA_TYPE'],
   ] satisfies Array<[string, InputContent[], string]>)('rejects unsupported %s', async (_name, content, code) => {
     const { binding } = await mount()
@@ -241,8 +229,9 @@ describe('AG-UI user content parts', () => {
 
   it('rejects images when the Host has no attachment storage', async () => {
     const { binding } = await mount()
+    await writeFile(join(binding.workspace?.uploadsDir ?? '', 'pixel.png'), PNG)
     const controller = await drive(binding, 'no-attachments', 'no-attachments-message', [
-      { type: 'image', source: { type: 'data', value: PNG.toString('base64'), mimeType: 'image/png' } },
+      { type: 'image', source: { type: 'url', value: fileUrl('pixel.png'), mimeType: 'image/png' } },
     ])
     expect(controller.record.events.at(-1)).toMatchObject({ code: 'IMAGES_UNSUPPORTED' })
     expect(loggedUsers(binding)).toHaveLength(0)
@@ -251,8 +240,9 @@ describe('AG-UI user content parts', () => {
   it('maps attachment admission errors without appending DSH input', async () => {
     const attachments = fakeAttachments(new AttachmentError('The image is invalid.', 'INVALID_IMAGE'))
     const { binding } = await mount(attachments)
+    await writeFile(join(binding.workspace?.uploadsDir ?? '', 'pixel.png'), PNG)
     const controller = await drive(binding, 'attachment-error', 'attachment-error-message', [
-      { type: 'image', source: { type: 'data', value: PNG.toString('base64'), mimeType: 'image/png' } },
+      { type: 'image', source: { type: 'url', value: fileUrl('pixel.png'), mimeType: 'image/png' } },
     ])
     expect(controller.record.events.at(-1)).toMatchObject({ code: 'INVALID_IMAGE', message: 'The image is invalid.' })
     expect(loggedUsers(binding)).toHaveLength(0)
@@ -261,8 +251,9 @@ describe('AG-UI user content parts', () => {
   it('contains unknown attachment-store failures as execution errors', async () => {
     const attachments = fakeAttachments(new Error('storage offline'))
     const { binding } = await mount(attachments)
+    await writeFile(join(binding.workspace?.uploadsDir ?? '', 'pixel.png'), PNG)
     const controller = await drive(binding, 'store-error', 'store-error-message', [
-      { type: 'image', source: { type: 'data', value: PNG.toString('base64'), mimeType: 'image/png' } },
+      { type: 'image', source: { type: 'url', value: fileUrl('pixel.png'), mimeType: 'image/png' } },
     ])
     expect(controller.record.events.at(-1)).toMatchObject({ code: 'AGENT_EXECUTION_ERROR' })
     expect(loggedUsers(binding)).toHaveLength(0)
@@ -271,8 +262,9 @@ describe('AG-UI user content parts', () => {
   it('validates every part before admitting an image batch', async () => {
     const attachments = fakeAttachments()
     const { binding } = await mount(attachments)
+    await writeFile(join(binding.workspace?.uploadsDir ?? '', 'pixel.png'), PNG)
     const controller = await drive(binding, 'atomic-parts', 'atomic-parts-message', [
-      { type: 'image', source: { type: 'data', value: PNG.toString('base64'), mimeType: 'image/png' } },
+      { type: 'image', source: { type: 'url', value: fileUrl('pixel.png'), mimeType: 'image/png' } },
       { type: 'document', source: { type: 'url', value: fileUrl('missing.txt') } },
     ])
     expect(controller.record.events.at(-1)).toMatchObject({ code: 'FILE_NOT_FOUND' })
@@ -290,12 +282,34 @@ describe('AG-UI user content parts', () => {
     expect(loggedUsers(binding)).toHaveLength(0)
   })
 
-  it('recovers the full content digest and detects a changed attachment', async () => {
+  it('returns the accepted parts in the snapshot so a client echo matches the digest', async () => {
+    const { binding } = await mount()
+    await writeFile(join(binding.workspace?.uploadsDir ?? '', 'report.csv'), 'hello world\n')
+    const parts: InputContent[] = [
+      { type: 'text', text: 'Review this report.' },
+      { type: 'document', source: { type: 'url', value: fileUrl('report.csv'), mimeType: 'text/csv' } },
+    ]
+    await drive(binding, 'echo-1', 'echo-message-1', parts)
+    const second = await drive(binding, 'echo-2', 'echo-message-2', 'Thanks.')
+    const snapshot = second.record.events.find((event): event is MessagesSnapshotEvent =>
+      event.type === EventType.MESSAGES_SNAPSHOT)
+    expect(snapshot?.messages[0]).toEqual({ id: 'echo-message-1', role: 'user', content: parts })
+    const echo = { ...input('echo-3', 'echo-message-3', 'And again.'), messages: [...snapshot?.messages ?? []] }
+    echo.messages.push({ id: 'echo-message-3', role: 'user', content: 'And again.' })
+    const third = binding.reserveRun(echo, 'digest-echo-3')
+    binding.drive(third)
+    await third.done
+    expect(third.record.events.at(-1)).toMatchObject({ type: EventType.RUN_FINISHED })
+    expect(loggedUsers(binding)).toHaveLength(3)
+  })
+
+  it('recovers the digest from the persisted parts and detects a changed attachment', async () => {
     const { binding } = await mount()
     await writeFile(join(binding.workspace?.uploadsDir ?? '', 'first.txt'), 'first')
-    await drive(binding, 'first-attachment', 'same-message', [
+    const parts: InputContent[] = [
       { type: 'document', source: { type: 'url', value: fileUrl('first.txt'), mimeType: 'text/plain' } },
-    ])
+    ]
+    await drive(binding, 'first-attachment', 'same-message', parts)
     const bindingInternals = binding as unknown as {
       acceptedMessages: Map<string, unknown>
       recover(events: ReturnType<ThreadBinding['liveAgent']['session']['snapshotEvents']>): void
@@ -303,7 +317,7 @@ describe('AG-UI user content parts', () => {
     const events = binding.liveAgent.session.snapshotEvents()
     const userEvent = events.find(event => event.type === 'user/message')
     if (userEvent?.type !== 'user/message') throw new Error('The durable user message is missing')
-    expect((userEvent.data.source as { agUiContentDigest?: string }).agUiContentDigest).toMatch(/^[a-f0-9]+$/)
+    expect((userEvent.data.source as { agUiContent?: unknown }).agUiContent).toEqual(parts)
     bindingInternals.acceptedMessages.clear()
     bindingInternals.recover(events)
     const controller = await drive(binding, 'changed-attachment', 'same-message', [

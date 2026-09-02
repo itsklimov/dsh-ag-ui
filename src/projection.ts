@@ -1,4 +1,4 @@
-import { EventType, type BaseEvent, type CustomEvent, type Message as AgUiMessage } from '@ag-ui/core'
+import { EventType, type BaseEvent, type CustomEvent, type InputContent, type Message as AgUiMessage } from '@ag-ui/core'
 import type { ContentBlock, ToolResultBlock } from '@deepseek-ai/dsh-llm'
 import { type SessionId, type SessionEvent, type TurnEndReason } from '@deepseek-ai/dsh-session'
 import {
@@ -32,7 +32,7 @@ interface ColdRecovery {
   /** The log's last turn ended interrupted by crash recovery. */
   readonly interrupted: boolean
   /** Recovered user messages, as (client id, text content) pairs in log order. */
-  readonly users: ReadonlyArray<{ readonly clientId: string; readonly content: string }>
+  readonly users: ReadonlyArray<{ readonly clientId: string; readonly content: string | InputContent[] }>
 }
 
 /** Where a tool call sits inside its DSH session. */
@@ -287,12 +287,12 @@ export class SessionProjection {
    */
   recoverFrom(events: readonly SessionEvent[]): ColdRecovery {
     let interrupted = false
-    const users: Array<{ clientId: string, content: string }> = []
+    const users: Array<{ clientId: string, content: string | InputContent[] }> = []
     for (const event of events) {
       if (event.type === 'user/message') {
         if (event.data.source.kind !== 'user') continue
         const clientId = clientUserId(String(event.data.id))
-        if (clientId !== undefined) users.push({ clientId, content: joinText(event.data.content) })
+        if (clientId !== undefined) users.push({ clientId, content: userContent(event.data) })
       } else if (event.type === 'tool/result') {
         this.serverResultCallIds.add(String(event.data.message.content[0].toolCallId))
       } else if (event.type === 'turn/end') {
@@ -330,7 +330,7 @@ export class SessionProjection {
         if (event.data.source.kind !== 'user') continue
         const id = userMessageId(String(event.data.id))
         if (id === undefined) continue
-        messages.push({ id, role: 'user', content: joinText(event.data.content) })
+        messages.push({ id, role: 'user', content: userContent(event.data) })
       } else if (event.type === 'assistant/message') {
         const text = joinText(event.data.message.content)
         if (text === '') continue
@@ -418,6 +418,13 @@ function announcedToolNames(content: readonly ContentBlock[]): string[] {
 }
 
 /** Concatenate the text blocks of one message's content. */
+/** The content the client sent for one durable user message: its persisted AG-UI parts, else the logged text. */
+function userContent(message: { readonly content: readonly ContentBlock[], readonly source: unknown }): string | InputContent[] {
+  const parts = (message.source as { agUiContent?: unknown }).agUiContent
+  // the Gateway wrote these parts itself after admission, so an array is the exact client content
+  return Array.isArray(parts) ? parts as InputContent[] : joinText(message.content)
+}
+
 function joinText(content: readonly ContentBlock[]): string {
   return content
     .filter((block): block is Extract<ContentBlock, { type: 'text' }> => block.type === 'text')

@@ -254,18 +254,9 @@ export class ThreadBinding {
   /** Rebuild idempotency bookkeeping from one recovered durable log. */
   private recover(events: readonly SessionEvent[]): void {
     const recovery = this.projection.recoverFrom(events)
-    const contentDigests = new Map(events.flatMap(event => {
-      if (event.type !== 'user/message' || event.data.source.kind !== 'user') return []
-      const digest = (event.data.source as { agUiContentDigest?: unknown }).agUiContentDigest
-      return typeof digest === 'string' ? [[String(event.data.id), digest] as const] : []
-    }))
     for (const user of recovery.users) {
-      const durableId = durableUserId(user.clientId)
-      this.userMessageIds.set(durableId, user.clientId)
-      this.acceptedMessages.set(user.clientId, {
-        role: 'user',
-        digest: contentDigests.get(durableId) ?? messageDigest(user.clientId, user.content),
-      })
+      this.userMessageIds.set(durableUserId(user.clientId), user.clientId)
+      this.acceptedMessages.set(user.clientId, { role: 'user', digest: messageDigest(user.clientId, user.content) })
     }
     this.interrupted = recovery.interrupted
   }
@@ -450,10 +441,10 @@ export class ThreadBinding {
     this.applyFrontendTools(controller.input.tools)
     this.injectContext(controller.input, baseline)
     this.commitSharedStateBaseline(baseline)
-    // the client's message id is preserved as the durable id, so a cold resume recovers the mapping
+    // the client's id and exact content parts are preserved, so the snapshot and a cold resume return what was accepted
     const source = typeof admission.content === 'string'
       ? { kind: 'user' as const }
-      : { kind: 'user' as const, agUiContentDigest: digest }
+      : { kind: 'user' as const, agUiContent: admission.content }
     const message: UserMessage = freezeMessage({
       id: MessageId(durableUserId(admission.id)),
       role: 'user',
@@ -477,16 +468,9 @@ export class ThreadBinding {
     for (const part of content) {
       if (part.type === 'text') {
         prompt.push({ type: 'text', text: part.text })
-      } else if (part.type === 'binary') {
-        throw new AgUiGatewayError('UNSUPPORTED_CONTENT_PART', 'Binary content parts must be uploaded as thread files.')
-      } else if (part.source.type === 'data') {
-        if (part.type !== 'image') {
-          throw new AgUiGatewayError('UNSUPPORTED_CONTENT_PART', 'Non-image data parts must be uploaded as thread files.')
-        }
-        if (!isImageMediaType(part.source.mimeType)) {
-          throw new AgUiGatewayError('UNSUPPORTED_MEDIA_TYPE', 'The image media type is not supported.')
-        }
-        prompt.push({ type: 'image', mediaType: part.source.mimeType, data: part.source.value })
+      } else if (part.type === 'binary' || part.source.type !== 'url') {
+        // only references round-trip through MESSAGES_SNAPSHOT unchanged; inline bytes belong in a thread file
+        throw new AgUiGatewayError('UNSUPPORTED_CONTENT_PART', 'Only text parts and thread file URLs are accepted; upload the file to the thread first.')
       } else {
         prompt.push(await this.admitFilePart(part))
       }
