@@ -1,8 +1,9 @@
 import type { Context } from '@deepseek-ai/cordis'
-import { mkdir, realpath } from 'node:fs/promises'
+import { lstat, mkdir, readFile, realpath } from 'node:fs/promises'
 import { join } from 'node:path'
 import {
   EventType,
+  type InputContent,
   type Message as AgUiMessage,
   type RunAgentInput,
   type Tool as AgUiTool,
@@ -10,7 +11,13 @@ import {
   type UserMessage as AgUiUserMessage,
 } from '@ag-ui/core'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
-import { createUserMessage, errorChain, freezeMessage, MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
+import type {
+  AdmittedPromptContentPart,
+  AttachmentStore,
+  ImageMediaType,
+  PromptContentPart,
+} from '@deepseek-ai/dsh-attachment'
+import { createUserMessage, errorChain, freezeMessage, MessageId, ToolCallId, type UserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import {
   assertObjectJsonSchema,
@@ -29,6 +36,8 @@ import type { ToolPresenter } from './tool-view.ts'
 import type { AgUiPrincipal, AgUiThreadIdentity } from './types.ts'
 
 const FRONTEND_TOOL_NAME = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/
+const FILE_URL_PATH = /\/threads\/([^/]+)\/files\/([^/]+)$/
+const IMAGE_MEDIA_TYPES = new Set<string>(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
 
 /** Fixed identity for registry scheduling probes that never dispatch. */
 const SCHEDULING_PROBE = {
@@ -51,6 +60,7 @@ export interface ThreadOptions {
   readonly maxRunEventBytes: number
   readonly maxRunsPerThread: number
   readonly maxStateBytes: number
+  readonly maxFilesPerMessage: number
 }
 
 interface AcceptedMessage {
@@ -244,9 +254,18 @@ export class ThreadBinding {
   /** Rebuild idempotency bookkeeping from one recovered durable log. */
   private recover(events: readonly SessionEvent[]): void {
     const recovery = this.projection.recoverFrom(events)
+    const contentDigests = new Map(events.flatMap(event => {
+      if (event.type !== 'user/message' || event.data.source.kind !== 'user') return []
+      const digest = (event.data.source as { agUiContentDigest?: unknown }).agUiContentDigest
+      return typeof digest === 'string' ? [[String(event.data.id), digest] as const] : []
+    }))
     for (const user of recovery.users) {
-      this.userMessageIds.set(durableUserId(user.clientId), user.clientId)
-      this.acceptedMessages.set(user.clientId, { role: 'user', digest: messageDigest(user.clientId, user.content) })
+      const durableId = durableUserId(user.clientId)
+      this.userMessageIds.set(durableId, user.clientId)
+      this.acceptedMessages.set(user.clientId, {
+        role: 'user',
+        digest: contentDigests.get(durableId) ?? messageDigest(user.clientId, user.content),
+      })
     }
     this.interrupted = recovery.interrupted
   }
@@ -341,28 +360,12 @@ export class ThreadBinding {
     try {
       const admission = this.classifyMessages(controller.input.messages)
       if (admission.kind === 'user') {
-        if (this.liveAgent.status !== 'idle' || this.pendingCalls.size !== 0) {
-          throw new AgUiGatewayError('AGENT_BUSY', 'The thread Agent is not ready for a new user run.', 409)
+        this.assertUserRunReady()
+        if (typeof admission.message.content === 'string') {
+          this.commitUserMessage(controller, admission.message, [{ type: 'text', text: admission.message.content }])
+        } else {
+          void this.driveContentParts(controller, admission.message)
         }
-        const baseline = this.prepareSharedState(controller.input)
-        this.assertStateToolAvailable(baseline)
-        this.applyFrontendTools(controller.input.tools)
-        this.injectContext(controller.input, baseline)
-        this.commitSharedStateBaseline(baseline)
-        // the client's message id is preserved as the durable id, so a cold resume recovers the mapping
-        const message = freezeMessage({
-          id: MessageId(durableUserId(admission.message.id)),
-          role: 'user',
-          content: [{ type: 'text', text: admission.message.content }],
-          source: { kind: 'user' },
-        })
-        this.acceptedMessages.set(admission.message.id, {
-          role: 'user',
-          digest: messageDigest(admission.message.id, admission.message.content),
-        })
-        controller.messageId = String(message.id)
-        this.userMessageIds.set(String(message.id), admission.message.id)
-        this.liveAgent.followup(message)
         return
       }
 
@@ -387,11 +390,126 @@ export class ThreadBinding {
       // a partial resolution leaves calls parked; finish so the client can answer the rest
       if (this.pendingCalls.size !== 0) controller.success()
     } catch (error) {
-      const failure = error instanceof AgUiGatewayError ? error : new AgUiGatewayError('AGENT_EXECUTION_ERROR', 'The AG-UI run could not start.', 500, error)
-      controller.error(failure.code, failure.message)
-      if (this.liveAgent.status === 'running') {
-        this.liveAgent.cancel({ kind: 'hook', reason: `AG-UI run admission failed: ${failure.code}` })
+      this.failRunAdmission(controller, error)
+    }
+  }
+
+  private assertUserRunReady(): void {
+    if (this.liveAgent.status !== 'idle' || this.pendingCalls.size !== 0) {
+      throw new AgUiGatewayError('AGENT_BUSY', 'The thread Agent is not ready for a new user run.', 409)
+    }
+  }
+
+  private async driveContentParts(controller: RunController, message: AgUiUserMessage): Promise<void> {
+    try {
+      const content = await this.admitUserContent(message.content as InputContent[])
+      /* v8 ignore next -- a disconnected run may finish while file admission is in flight. */
+      if (controller.record.state !== 'active') return
+      this.commitUserMessage(controller, message, content)
+    } catch (error) {
+      this.failRunAdmission(controller, error)
+    }
+  }
+
+  private commitUserMessage(
+    controller: RunController,
+    admission: AgUiUserMessage,
+    content: AdmittedPromptContentPart[],
+  ): void {
+    const digest = messageDigest(admission.id, admission.content)
+    const baseline = this.prepareSharedState(controller.input)
+    this.assertStateToolAvailable(baseline)
+    this.applyFrontendTools(controller.input.tools)
+    this.injectContext(controller.input, baseline)
+    this.commitSharedStateBaseline(baseline)
+    // the client's message id is preserved as the durable id, so a cold resume recovers the mapping
+    const source = typeof admission.content === 'string'
+      ? { kind: 'user' as const }
+      : { kind: 'user' as const, agUiContentDigest: digest }
+    const message: UserMessage = freezeMessage({
+      id: MessageId(durableUserId(admission.id)),
+      role: 'user',
+      content,
+      source,
+    })
+    this.acceptedMessages.set(admission.id, {
+      role: 'user',
+      digest,
+    })
+    controller.messageId = String(message.id)
+    this.userMessageIds.set(String(message.id), admission.id)
+    this.liveAgent.followup(message)
+  }
+
+  private async admitUserContent(content: InputContent[]): Promise<AdmittedPromptContentPart[]> {
+    if (content.filter(part => part.type !== 'text').length > this.options.maxFilesPerMessage) {
+      throw new AgUiGatewayError('FILE_LIMIT_EXCEEDED', 'The user message contains too many non-text content parts.', 413)
+    }
+    const prompt: PromptContentPart[] = []
+    for (const part of content) {
+      if (part.type === 'text') {
+        prompt.push({ type: 'text', text: part.text })
+      } else if (part.type === 'binary') {
+        throw new AgUiGatewayError('UNSUPPORTED_CONTENT_PART', 'Binary content parts must be uploaded as thread files.')
+      } else if (part.source.type === 'data') {
+        if (part.type !== 'image') {
+          throw new AgUiGatewayError('UNSUPPORTED_CONTENT_PART', 'Non-image data parts must be uploaded as thread files.')
+        }
+        if (!isImageMediaType(part.source.mimeType)) {
+          throw new AgUiGatewayError('UNSUPPORTED_MEDIA_TYPE', 'The image media type is not supported.')
+        }
+        prompt.push({ type: 'image', mediaType: part.source.mimeType, data: part.source.value })
+      } else {
+        prompt.push(await this.admitFilePart(part))
       }
+    }
+    if (prompt.every(part => part.type === 'text')) return prompt
+    const attachments = attachmentsOf(this.ctx)
+    if (attachments === undefined) {
+      throw new AgUiGatewayError('IMAGES_UNSUPPORTED', 'This Host does not provide image attachment storage.')
+    }
+    const attachment = await import('@deepseek-ai/dsh-attachment')
+    try {
+      return await attachment.admitPromptContent(attachments, prompt)
+    } catch (error) {
+      if (error instanceof attachment.AttachmentError) {
+        throw new AgUiGatewayError(error.code, error.message, 400, error)
+      }
+      throw error
+    }
+  }
+
+  private async admitFilePart(part: Exclude<InputContent, { type: 'text' | 'binary' }>): Promise<PromptContentPart> {
+    const workspace = this.workspace
+    if (workspace === undefined) {
+      throw new AgUiGatewayError('THREAD_WITHOUT_WORKSPACE', 'This legacy thread has no workspace for file references.', 409)
+    }
+    const name = fileNameFromUrl(part.source.value, this.identity.threadId)
+    const path = join(workspace.uploadsDir, name)
+    let size: number
+    try {
+      const entry = await lstat(path)
+      if (!entry.isFile()) throw new Error('not a regular file')
+      size = entry.size
+    } catch (error) {
+      throw new AgUiGatewayError('FILE_NOT_FOUND', 'The referenced thread file was not found.', 400, error)
+    }
+    const mediaType = part.source.mimeType ?? 'application/octet-stream'
+    if (part.type === 'image' || isImageMediaType(mediaType)) {
+      if (!isImageMediaType(mediaType)) {
+        throw new AgUiGatewayError('UNSUPPORTED_MEDIA_TYPE', 'The image media type is not supported.')
+      }
+      // only images are read into memory; other files stay on disk for the Agent's own tools
+      return { type: 'image', mediaType, data: (await readFile(path)).toString('base64'), name }
+    }
+    return { type: 'text', text: `Attached file: uploads/${name} (${mediaType}, ${String(size)} bytes)` }
+  }
+
+  private failRunAdmission(controller: RunController, error: unknown): void {
+    const failure = error instanceof AgUiGatewayError ? error : new AgUiGatewayError('AGENT_EXECUTION_ERROR', 'The AG-UI run could not start.', 500, error)
+    controller.error(failure.code, failure.message)
+    if (this.liveAgent.status === 'running') {
+      this.liveAgent.cancel({ kind: 'hook', reason: `AG-UI run admission failed: ${failure.code}` })
     }
   }
 
@@ -436,9 +554,9 @@ export class ThreadBinding {
   }
 
   private classifyMessages(messages: AgUiMessage[]):
-    | { kind: 'user'; message: AgUiUserMessage & { content: string } }
+    | { kind: 'user'; message: AgUiUserMessage }
     | { kind: 'tools'; messages: AgUiToolMessage[] } {
-    const users: Array<AgUiUserMessage & { content: string }> = []
+    const users: AgUiUserMessage[] = []
     const tools: AgUiToolMessage[] = []
     for (const message of messages) {
       if (message.role !== 'user' && message.role !== 'tool') continue
@@ -458,13 +576,10 @@ export class ThreadBinding {
           throw new AgUiGatewayError('UNKNOWN_TOOL_RESULT', 'The Tool result has no pending or completed server call.', 409)
         }
       } else {
-        if (typeof message.content !== 'string') {
-          throw new AgUiGatewayError('UNSUPPORTED_MESSAGE_CONTENT', 'V1 accepts text user messages only.')
-        }
-        users.push(message as AgUiUserMessage & { content: string })
+        users.push(message)
       }
     }
-    if (users.length === 1 && tools.length === 0) return { kind: 'user', message: users[0] as AgUiUserMessage & { content: string } }
+    if (users.length === 1 && tools.length === 0) return { kind: 'user', message: users[0] as AgUiUserMessage }
     if (users.length === 0 && tools.length > 0) return { kind: 'tools', messages: tools }
     throw new AgUiGatewayError(
       'INVALID_MESSAGE_BATCH',
@@ -792,13 +907,50 @@ function isEmptyStateContainer(value: unknown): boolean {
 }
 
 /** Digest one accepted user message in a fixed field order, stable across cold resume. */
-function messageDigest(clientId: string, content: string): string {
+function messageDigest(clientId: string, content: AgUiUserMessage['content']): string {
   return valueDigest({ id: clientId, role: 'user', content })
+}
+
+/** Resolve and validate one Gateway-owned thread file reference. */
+function fileNameFromUrl(value: string, threadId: string): string {
+  let pathname: string
+  try {
+    pathname = new URL(value, 'http://ag-ui.invalid').pathname
+  } catch (error) {
+    throw new AgUiGatewayError('INVALID_CONTENT_PART', 'The file URL is invalid.', 400, error)
+  }
+  const match = FILE_URL_PATH.exec(pathname)
+  if (match === null) throw new AgUiGatewayError('INVALID_CONTENT_PART', 'The file URL does not reference a thread upload.')
+  let referencedThread: string
+  let name: string
+  try {
+    referencedThread = decodeURIComponent(match[1] as string)
+    name = decodeURIComponent(match[2] as string)
+  } catch (error) {
+    throw new AgUiGatewayError('INVALID_CONTENT_PART', 'The file URL encoding is invalid.', 400, error)
+  }
+  if (referencedThread !== threadId) {
+    throw new AgUiGatewayError('INVALID_CONTENT_PART', 'The file URL belongs to another thread.')
+  }
+  if (name === '' || name === '.' || name === '..' || name.startsWith('.') || name.includes('/') || name.includes('\\')) {
+    throw new AgUiGatewayError('FILE_NOT_FOUND', 'The referenced thread file was not found.')
+  }
+  return name
+}
+
+/** Narrow the four image formats accepted by prompt attachment admission. */
+function isImageMediaType(value: string): value is ImageMediaType {
+  return IMAGE_MEDIA_TYPES.has(value)
 }
 
 /** Optional durable persistence service, when the host configured a backend. */
 interface SessionPersistenceLike {
   list(signal?: AbortSignal): Promise<ReadonlyArray<{ readonly id: SessionId }>>
+}
+
+/** Resolve optional image attachment storage without requiring it from every Host. */
+function attachmentsOf(ctx: Context): AttachmentStore | undefined {
+  return (ctx as Context & { get(name: string): unknown }).get('attachments') as AttachmentStore | undefined
 }
 
 /** Resolve the optional host workspace registry without requiring the package. */

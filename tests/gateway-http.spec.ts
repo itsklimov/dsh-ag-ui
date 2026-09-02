@@ -127,6 +127,7 @@ describe('AG-UI configuration', () => {
     [{ workspaceRoot: '' }, 'workspaceRoot must not be empty'],
     [{ maxFileBytes: 0 }, 'maxFileBytes must be positive'],
     [{ maxThreads: 0 }, 'maxThreads must be positive'],
+    [{ maxFilesPerMessage: 0 }, 'maxFilesPerMessage must be positive'],
     [{ threadIdleMs: 0 }, 'threadIdleMs must be positive'],
     [{ maxRunEvents: 1 }, 'maxRunEvents must retain opening and terminal events'],
     [{ maxRunEventBytes: 1 }, 'maxRunEventBytes cannot retain mandatory opening and terminal events'],
