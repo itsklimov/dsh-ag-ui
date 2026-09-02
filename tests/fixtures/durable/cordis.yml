@@ -46,6 +46,7 @@
     provider: fixture-scripted
     model: fixture-scripted
     sharedSecret: !!js process.env.DSH_AG_UI_FIXTURE_SECRET
+    workspaceRoot: !!js process.env.DSH_AG_UI_FIXTURE_ROOT + '/workspaces'
     path: /ag-ui
     maxRunEvents: 256
     maxRunEventBytes: 262144

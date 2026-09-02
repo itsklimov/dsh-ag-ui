@@ -1,5 +1,8 @@
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
+import { mkdtemp, rm } from 'node:fs/promises'
 import { createServer } from 'node:net'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { firstValueFrom, from } from 'rxjs'
 import { toArray } from 'rxjs/operators'
 import { verifyEvents, type HttpAgent, type Message, type Tool, type ToolCall } from '@ag-ui/client'
@@ -83,10 +86,12 @@ export function lastAssistantText(messages: Message[]): string | undefined {
 }
 
 const mounted: Context[] = []
+const workspaceRoots: string[] = []
 
 /** Dispose every context mounted through this module; call from afterEach. */
 export async function disposeMountedContexts(): Promise<void> {
   for (const ctx of mounted.splice(0).reverse()) await ctx.fiber.dispose()
+  await Promise.all(workspaceRoots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 }
 
 /** Standard resource limits shared by the in-process gateway specs. */
@@ -126,10 +131,13 @@ export async function mountGateway(
   for (const tool of options.tools ?? []) ctx.tools.register(tool)
   const adapter = new ScriptedAdapter(script)
   ctx.llm.registerAdapter(['scripted'], adapter)
+  const workspaceRoot = await mkdtemp(join(tmpdir(), 'ag-ui-workspaces-'))
+  workspaceRoots.push(workspaceRoot)
   const gateway = await ctx.plugin(AgUiGateway, {
     provider: 'scripted',
     model: 'scripted',
     sharedSecret: secret,
+    workspaceRoot,
     ...STANDARD_LIMITS,
     ...options.limits,
   })
