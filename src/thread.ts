@@ -362,34 +362,35 @@ export class ThreadBinding {
   drive(controller: RunController): void {
     if (this.activeRun !== controller) throw new AgUiGatewayError('RUN_NOT_ACTIVE', 'The AG-UI run lost its reservation.', 409)
     controller.start()
-    controller.emit({
-      type: EventType.MESSAGES_SNAPSHOT,
-      messages: this.projection.messagesSnapshot(this.liveAgent.session.snapshotEvents(), id => this.userMessageIds.get(id)),
-    })
-    // the transcript's settled cards ride beside the snapshot, re-derived from the same durable log
-    for (const view of this.projection.toolViewEvents(this.liveAgent.session.snapshotEvents())) controller.emit(view)
-    // a snapshot that overflowed the run budget already settled the run
-    if (controller.record.state !== 'active') return
-    // a restarted thread reports its interrupted turn once so the client can drop parked calls
+    // a restarted thread reports its interrupted turn once, after its history, so the client can drop parked calls
     if (this.interrupted) {
       this.interrupted = false
+      this.emitHistory(controller, [])
       controller.error('THREAD_INTERRUPTED', 'The AG-UI thread was interrupted by a restart; its pending frontend Tool calls are closed.')
       return
     }
     try {
       const admission = this.classifyMessages(controller.input.messages)
+      if (admission.kind === 'sync') {
+        this.emitHistory(controller, [])
+        controller.success()
+        return
+      }
       if (admission.kind === 'user') {
         this.assertUserRunReady()
-        if (typeof admission.message.content === 'string') {
-          this.commitUserMessage(controller, admission.message, [{ type: 'text', text: admission.message.content }])
-        } else {
-          void this.driveContentParts(controller, admission.message)
-        }
+        const text = admission.messages.flatMap(message => typeof message.content === 'string'
+          ? [{ message, content: [{ type: 'text' as const, text: message.content }] }]
+          : [])
+        if (text.length === admission.messages.length) this.commitUserMessages(controller, text)
+        else void this.driveContentParts(controller, admission.messages)
         return
       }
 
       const turn = this.continuationTurn(admission.messages)
       controller.turn = turn
+      this.emitHistory(controller, [])
+      /* v8 ignore next -- a continuation whose history snapshot overflowed the run budget is already settled; the user path covers the same guard. */
+      if (controller.record.state !== 'active') return
       const baseline = this.prepareSharedState(controller.input)
       this.assertStateToolAvailable(baseline)
       this.stagedTools = controller.input.tools
@@ -419,45 +420,75 @@ export class ThreadBinding {
     }
   }
 
-  private async driveContentParts(controller: RunController, message: AgUiUserMessage): Promise<void> {
+  /**
+   * Emit the durable transcript beside the user messages this run has just
+   * admitted; the DSH log records those only once the driver claims them.
+   * @param accepted - new client user messages, in arrival order.
+   */
+  private emitHistory(controller: RunController, accepted: readonly AgUiUserMessage[]): void {
+    const events = this.liveAgent.session.snapshotEvents()
+    controller.emit({
+      type: EventType.MESSAGES_SNAPSHOT,
+      messages: [
+        ...this.projection.messagesSnapshot(events, id => this.userMessageIds.get(id)),
+        ...accepted.map(message => ({ id: message.id, role: 'user' as const, content: message.content })),
+      ],
+    })
+    // the transcript's settled cards ride beside the snapshot, re-derived from the same durable log
+    for (const view of this.projection.toolViewEvents(events)) controller.emit(view)
+  }
+
+  private async driveContentParts(controller: RunController, messages: readonly AgUiUserMessage[]): Promise<void> {
     try {
-      const content = await this.admitUserContent(message.content as InputContent[])
+      const admitted = await Promise.all(messages.map(async message => ({
+        message,
+        content: await this.admitUserContent(typeof message.content === 'string'
+          ? [{ type: 'text', text: message.content }]
+          : message.content as InputContent[]),
+      })))
       /* v8 ignore next -- a disconnected run may finish while file admission is in flight. */
       if (controller.record.state !== 'active') return
-      this.commitUserMessage(controller, message, content)
+      this.commitUserMessages(controller, admitted)
     } catch (error) {
       this.failRunAdmission(controller, error)
     }
   }
 
-  private commitUserMessage(
+  /** Queue every admitted user message into one DSH turn, in arrival order. */
+  private commitUserMessages(
     controller: RunController,
-    admission: AgUiUserMessage,
-    content: AdmittedPromptContentPart[],
+    admitted: ReadonlyArray<{ message: AgUiUserMessage, content: AdmittedPromptContentPart[] }>,
   ): void {
-    const digest = messageDigest(admission.id, admission.content)
+    this.emitHistory(controller, admitted.map(item => item.message))
+    // a snapshot that overflowed the run budget already settled the run
+    if (controller.record.state !== 'active') return
     const baseline = this.prepareSharedState(controller.input)
     this.assertStateToolAvailable(baseline)
     this.applyFrontendTools(controller.input.tools)
     this.injectContext(controller.input, baseline)
     this.commitSharedStateBaseline(baseline)
-    // the client's id and exact content parts are preserved, so the snapshot and a cold resume return what was accepted
-    const source = typeof admission.content === 'string'
-      ? { kind: 'user' as const }
-      : { kind: 'user' as const, agUiContent: admission.content }
-    const message: UserMessage = freezeMessage({
-      id: MessageId(durableUserId(admission.id)),
-      role: 'user',
-      content,
-      source,
+    const durable = admitted.map(({ message: admission, content }) => {
+      // the client's id and exact content parts are preserved, so the snapshot and a cold resume return what was accepted
+      const source = typeof admission.content === 'string'
+        ? { kind: 'user' as const }
+        : { kind: 'user' as const, agUiContent: admission.content }
+      const message: UserMessage = freezeMessage({
+        id: MessageId(durableUserId(admission.id)),
+        role: 'user',
+        content,
+        source,
+      })
+      this.acceptedMessages.set(admission.id, { role: 'user', digest: messageDigest(admission.id, admission.content) })
+      this.userMessageIds.set(String(message.id), admission.id)
+      return message
     })
-    this.acceptedMessages.set(admission.id, {
-      role: 'user',
-      digest,
+    // a turn claims one next-turn message plus every pending next-step one, so the
+    // earlier messages park at the step boundary and the last one wakes the driver
+    durable.forEach((message, index) => {
+      controller.messageId = String(message.id)
+      if (index < durable.length - 1) this.liveAgent.send(message, 'next-step', false)
+      else this.liveAgent.followup(message)
     })
-    controller.messageId = String(message.id)
-    this.userMessageIds.set(String(message.id), admission.id)
-    this.liveAgent.followup(message)
   }
 
   private async admitUserContent(content: InputContent[]): Promise<AdmittedPromptContentPart[]> {
@@ -565,8 +596,10 @@ export class ThreadBinding {
     }
   }
 
+  /** Sort a run's new messages: user messages open a turn, Tool results continue one, none at all only synchronizes history. */
   private classifyMessages(messages: AgUiMessage[]):
-    | { kind: 'user'; message: AgUiUserMessage }
+    | { kind: 'sync' }
+    | { kind: 'user'; messages: AgUiUserMessage[] }
     | { kind: 'tools'; messages: AgUiToolMessage[] } {
     const users: AgUiUserMessage[] = []
     const tools: AgUiToolMessage[] = []
@@ -591,12 +624,12 @@ export class ThreadBinding {
         users.push(message)
       }
     }
-    if (users.length === 1 && tools.length === 0) return { kind: 'user', message: users[0] as AgUiUserMessage }
-    if (users.length === 0 && tools.length > 0) return { kind: 'tools', messages: tools }
-    throw new AgUiGatewayError(
-      'INVALID_MESSAGE_BATCH',
-      'A run must contain one new user message or one or more new frontend Tool results.',
-    )
+    if (users.length > 0 && tools.length > 0) {
+      throw new AgUiGatewayError('INVALID_MESSAGE_BATCH', 'A run cannot mix new user messages with new frontend Tool results.')
+    }
+    if (users.length > 0) return { kind: 'user', messages: users }
+    if (tools.length > 0) return { kind: 'tools', messages: tools }
+    return { kind: 'sync' }
   }
 
   private continuationTurn(messages: AgUiToolMessage[]): number {

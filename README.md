@@ -313,7 +313,7 @@ The separate [`dsh-ag-ui-adapter`](packages/dsh-ag-ui-adapter) package is the em
 ## HTTP and run semantics
 
 - Requests must be `POST application/json` and match AG-UI `RunAgentInput`.
-- A normal run accepts one new user message with text or supported multimodal content parts.
+- A normal run accepts one or more new user messages with text or supported multimodal content parts; they join one DSH turn in arrival order. A run without new messages only returns the history snapshot.
 - A continuation accepts one or more new frontend ToolMessages for one pending DSH turn.
 - One DSH turn can cross multiple AG-UI HTTP runs.
 - Each run emits one `RUN_STARTED` and exactly one `RUN_FINISHED` or `RUN_ERROR`.

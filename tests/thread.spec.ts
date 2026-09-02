@@ -189,10 +189,71 @@ describe('ThreadBinding run admission', () => {
     await mixed.done
     expect(mixed.record.events.at(-1)).toMatchObject({ code: 'UNKNOWN_TOOL_RESULT' })
 
-    const empty = binding.reserveRun(input('run-4', []), 'digest-4')
-    binding.drive(empty)
-    await empty.done
-    expect(empty.record.events.at(-1)).toMatchObject({ code: 'INVALID_MESSAGE_BATCH' })
+    // nothing new only synchronizes the client with the durable history
+    const sync = binding.reserveRun(input('run-4', []), 'digest-4')
+    binding.drive(sync)
+    await sync.done
+    expect(sync.record.events.map(event => event.type)).toEqual([
+      EventType.RUN_STARTED,
+      EventType.MESSAGES_SNAPSHOT,
+      EventType.RUN_FINISHED,
+    ])
+
+    internals(binding).pendingCalls.set('call-pending', { turn: 1, resolve() {}, reject() {} })
+    const pending = binding.reserveRun(input('run-5', [
+      { id: 'message-5', role: 'user', content: 'hello' },
+      { id: 'tool-5', role: 'tool', toolCallId: 'call-pending', content: 'result' },
+    ]), 'digest-5')
+    binding.drive(pending)
+    await pending.done
+    expect(pending.record.events.at(-1)).toMatchObject({ code: 'INVALID_MESSAGE_BATCH' })
+  })
+
+  it('admits every new user message of one run into the same turn and echoes them in the snapshot', async () => {
+    const { binding, adapter } = await mount([textResponse('both'), textResponse('again')])
+    // a run that failed before admission leaves its message in the client, so the next run carries two
+    const batch = binding.reserveRun(input('run-batch', [
+      { id: 'message-a', role: 'user', content: 'first' },
+      { id: 'message-b', role: 'user', content: 'second' },
+    ]), 'digest-batch')
+    binding.drive(batch)
+    await batch.done
+    await binding.liveAgent.whenIdle()
+    expect(batch.record.events.map(event => event.type)).toEqual([
+      EventType.RUN_STARTED,
+      EventType.MESSAGES_SNAPSHOT,
+      EventType.TEXT_MESSAGE_START,
+      EventType.TEXT_MESSAGE_CONTENT,
+      EventType.TEXT_MESSAGE_END,
+      EventType.RUN_FINISHED,
+    ])
+    expect(batch.record.events[1]).toEqual({
+      type: EventType.MESSAGES_SNAPSHOT,
+      messages: [
+        { id: 'message-a', role: 'user', content: 'first' },
+        { id: 'message-b', role: 'user', content: 'second' },
+      ],
+    })
+    expect(adapter.requests).toHaveLength(1)
+    expect(JSON.stringify(adapter.requests[0]?.messages)).toMatch(/first.*second/)
+
+    const next = binding.reserveRun(input('run-next', [
+      { id: 'message-a', role: 'user', content: 'first' },
+      { id: 'message-b', role: 'user', content: 'second' },
+      { id: 'message-c', role: 'user', content: 'third' },
+    ]), 'digest-next')
+    binding.drive(next)
+    await next.done
+    expect(next.record.events[1]).toMatchObject({
+      type: EventType.MESSAGES_SNAPSHOT,
+      messages: [
+        { id: 'message-a', role: 'user' },
+        { id: 'message-b', role: 'user' },
+        { role: 'assistant', content: 'both' },
+        { id: 'message-c', role: 'user', content: 'third' },
+      ],
+    })
+    expect(next.record.events.at(-1)).toMatchObject({ type: EventType.RUN_FINISHED })
   })
 
   it('rejects unknown Tool results', async () => {
@@ -584,7 +645,10 @@ describe('ThreadBinding shared state', () => {
     }
     const opening = { type: EventType.RUN_STARTED, threadId: 'thread-1', runId: 'state-update-bytes' }
     const baseline = { type: EventType.STATE_SNAPSHOT, snapshot: { value: 1 } }
-    const messagesSnapshot = { type: EventType.MESSAGES_SNAPSHOT, messages: [] }
+    const messagesSnapshot = {
+      type: EventType.MESSAGES_SNAPSHOT,
+      messages: [{ id: 'state-update-message-bytes', role: 'user', content: 'update state' }],
+    }
     const byteLimit = [opening, messagesSnapshot, baseline].reduce((total, event) => total + Buffer.byteLength(JSON.stringify(event)), 0)
       + Math.max(Buffer.byteLength(JSON.stringify(success)), Buffer.byteLength(JSON.stringify(overflowError)))
 

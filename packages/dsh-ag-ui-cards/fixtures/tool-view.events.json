@@ -8,7 +8,13 @@
       },
       {
         "type": "MESSAGES_SNAPSHOT",
-        "messages": []
+        "messages": [
+          {
+            "id": "cards-user-1",
+            "role": "user",
+            "content": "Record every card kind."
+          }
+        ]
       },
       {
         "type": "TOOL_CALL_START",
@@ -616,6 +622,11 @@
             "id": "ag-ui:ag-ui-a8363bf0a4b03cf8b8c250a496625d58d2fa0456:1:2:assistant",
             "role": "assistant",
             "content": "Every card recorded."
+          },
+          {
+            "id": "cards-user-2",
+            "role": "user",
+            "content": "Replay cold."
           }
         ]
       },

@@ -303,6 +303,23 @@ describe('AG-UI user content parts', () => {
     expect(loggedUsers(binding)).toHaveLength(3)
   })
 
+  it('admits a text message and a parts message of one run into the same turn', async () => {
+    const { binding } = await mount()
+    await writeFile(join(binding.workspace?.uploadsDir ?? '', 'notes.txt'), 'notes\n')
+    const messages: RunAgentInput['messages'] = [
+      { id: 'batch-text', role: 'user', content: 'Read the notes.' },
+      { id: 'batch-parts', role: 'user', content: [
+        { type: 'document', source: { type: 'url', value: fileUrl('notes.txt'), mimeType: 'text/plain' } },
+      ] },
+    ]
+    const controller = binding.reserveRun({ ...input('batch-1', 'batch-text', ''), messages }, 'digest-batch-1')
+    binding.drive(controller)
+    await controller.done
+    expect(controller.record.events.at(-1)).toMatchObject({ type: EventType.RUN_FINISHED })
+    expect(controller.record.events[1]).toEqual({ type: EventType.MESSAGES_SNAPSHOT, messages })
+    expect(loggedUsers(binding).map(message => String(message.id))).toEqual(['ag-ui:user:batch-text', 'ag-ui:user:batch-parts'])
+  })
+
   it('recovers the digest from the persisted parts and detects a changed attachment', async () => {
     const { binding } = await mount()
     await writeFile(join(binding.workspace?.uploadsDir ?? '', 'first.txt'), 'first')
