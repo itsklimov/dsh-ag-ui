@@ -17,6 +17,7 @@ A community [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 
 - Installable DSH Profile Bundle through `dsh plugin add`
 - Floored AG-UI protocol range (`~0.0.58`)
 - Authenticated BFF-to-Gateway requests with trusted tenant and user headers
+- Streamed per-thread file upload and authenticated download routes
 - Process-local `(tenantId, userId, threadId)` bindings to DSH Agents
 - AG-UI text streaming and backend Tool result projection
 - Agent-scoped browser Tools supplied by `RunAgentInput.tools`
@@ -103,7 +104,7 @@ A later Profile patch replaces the bundle row's complete `config`; include every
 
 | Field | Default | Purpose |
 | --- | --- | --- |
-| `path` | `/ag-ui` | Exact Host HTTP route |
+| `path` | `/ag-ui` | Base Host HTTP route for runs and files |
 | `provider` | required | Registered DSH model provider route |
 | `model` | required | Model ID owned by the provider |
 | `workspaceRoot` | `<DSH_HOME>/workspaces` | Root for per-thread workspace directories, named by durable session id |
@@ -114,6 +115,7 @@ A later Profile patch replaces the bundle row's complete `config`; include every
 | `userHeader` | `x-dsh-user-id` | Trusted user identity header |
 | `allowNonLoopback` | `false` | Permit a non-loopback Host bind explicitly |
 | `maxRequestBytes` | `262144` | Maximum request body bytes |
+| `maxFileBytes` | `104857600` | Maximum bytes per uploaded file |
 | `maxIdentityBytes` | `256` | Maximum bytes per protocol or identity ID |
 | `maxMessages` | `256` | Maximum message count per request |
 | `maxMessageBytes` | `524288` | Maximum combined message JSON bytes |
@@ -134,6 +136,8 @@ A later Profile patch replaces the bundle row's complete `config`; include every
 `agentPreset` composes each thread's agent from the host's agent-presets roster (mount the roster plugin before this Gateway); an unresolvable id fails Gateway activation loudly, a per-tenant entry overrides the deployment default for that tenant's threads, and a resumed thread keeps the composition its own durable session recorded. Without `agentPreset`, threads keep the host composition unchanged.
 
 Each new thread uses `<workspaceRoot>/<sessionId>` as its DSH session working directory and receives an `uploads` subdirectory. The directory is named by the durable session id, so client thread ids stay off disk. Relative and `~` paths are expanded at activation. When the Host provides `workspaceRegistry`, the Gateway also registers new thread workspaces for DSH Web.
+
+A trusted BFF can stream files into that directory before a run. `POST <path>/threads/<threadId>/files` accepts the raw body with `content-length`, optional `content-type`, and a percent-encoded UTF-8 name in `x-file-name`. `GET <path>/threads/<threadId>/files/<name>` downloads a file from an existing authenticated thread binding. Both routes use the same bearer secret and identity headers as the run route.
 
 `maxRunEvents` must retain at least the mandatory opening and terminal events. `maxRunEventBytes` bounds the complete retained Run record, including `RUN_STARTED` and its terminal event, and must be large enough for the configured maximum identity length. A non-loopback DSH WebServer requires `allowNonLoopback: true`. Prefer a loopback Gateway behind a same-host authenticated BFF.
 

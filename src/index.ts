@@ -14,6 +14,7 @@ import { dshHomePath, expandHomePath } from '@deepseek-ai/dsh-home-paths'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-tools'
 import { AgUiGatewayError, publicError } from './errors.ts'
+import { createFileRoute } from './files.ts'
 import { jsonBytes, jsonDepth, requestDigest, utf8Bytes } from './json.ts'
 import { agentPresetsOf } from './presets.ts'
 import { replayRun } from './run.ts'
@@ -31,7 +32,7 @@ const IDENTITY = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/
 
 /** AG-UI HTTP, identity, lifecycle, and resource limits. */
 export interface Config {
-  /** Exact HTTP route. */
+  /** Base HTTP route for runs and thread files. */
   path?: string
   /** Provider route for Gateway-created Agents. */
   provider: string
@@ -53,6 +54,8 @@ export interface Config {
   allowNonLoopback?: boolean
   /** Maximum request body bytes. */
   maxRequestBytes?: number
+  /** Maximum raw bytes in one uploaded file. */
+  maxFileBytes?: number
   /** Maximum bytes in each identity or AG-UI id. */
   maxIdentityBytes?: number
   /** Maximum messages retained in one AG-UI request. */
@@ -100,6 +103,7 @@ export const Config: z<Config> = z.object({
   userHeader: z.string().default('x-dsh-user-id'),
   allowNonLoopback: z.boolean().default(false),
   maxRequestBytes: z.natural().default(256 * 1024),
+  maxFileBytes: z.natural().default(100 * 1024 * 1024),
   maxIdentityBytes: z.natural().default(256),
   maxMessages: z.natural().default(256),
   maxMessageBytes: z.natural().default(512 * 1024),
@@ -150,14 +154,29 @@ export class AgUiGateway extends Service implements AgUiAgentLookup {
       workspaceRoot: resolveWorkspaceRoot(config.workspaceRoot as string),
     } as Required<Config>
     assertConfig(ctx, this.resolved)
+    const fileRoute = createFileRoute({
+      path: this.resolved.path,
+      maxFileBytes: this.resolved.maxFileBytes,
+      authenticate: request => this.authenticate(request),
+      validateThreadId: threadId => validateIdentity(threadId, 'thread', this.resolved.maxIdentityBytes),
+      bindingFor: (principal, threadId) => this.bindingFor(principal, threadId),
+      existingBinding: (principal, threadId) => this.bindings.get(bindingKey(principal, threadId)),
+      respondError: (response, error) => this.respondError(response, error),
+    })
     ctx.effect(() => {
-      const unregister = ctx.webServer.register({
+      const unregisterRun = ctx.webServer.register({
         kind: 'exact',
         path: this.resolved.path,
         handler: (request, response) => this.handle(request, response),
       })
+      const unregisterFiles = ctx.webServer.register({
+        kind: 'prefix',
+        path: `${this.resolved.path}/threads`,
+        handler: fileRoute,
+      })
       return async () => {
-        unregister()
+        unregisterFiles()
+        unregisterRun()
         await this.disposeAll()
       }
     }, 'ag-ui.routeAndThreads')
