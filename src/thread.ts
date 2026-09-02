@@ -138,7 +138,7 @@ export class ThreadBinding {
     if (persistence === undefined) return create()
     try {
       const handle = await this.ctx.agents.resume({ resumeSessionId: this.sessionId, agentOptions, setup: this.agentSetup() })
-      this.recover(handle.agent.session.events)
+      this.recover(handle.agent.session.snapshotEvents())
       return handle
     } catch (error) {
       // only a genuinely absent artifact falls back to first creation; a present one keeps its failure loud
@@ -263,10 +263,10 @@ export class ThreadBinding {
     controller.start()
     controller.emit({
       type: EventType.MESSAGES_SNAPSHOT,
-      messages: this.projection.messagesSnapshot(this.liveAgent.session.events, id => this.userMessageIds.get(id)),
+      messages: this.projection.messagesSnapshot(this.liveAgent.session.snapshotEvents(), id => this.userMessageIds.get(id)),
     })
     // the transcript's settled cards ride beside the snapshot, re-derived from the same durable log
-    for (const view of this.projection.toolViewEvents(this.liveAgent.session.events)) controller.emit(view)
+    for (const view of this.projection.toolViewEvents(this.liveAgent.session.snapshotEvents())) controller.emit(view)
     // a snapshot that overflowed the run budget already settled the run
     if (controller.record.state !== 'active') return
     // a restarted thread reports its interrupted turn once so the client can drop parked calls

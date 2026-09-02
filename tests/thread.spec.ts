@@ -244,7 +244,7 @@ describe('ThreadBinding run admission', () => {
     const controller = binding.reserveRun(input('run-derived', [{ id: 'message-derived', role: 'user', content: 'hello' }]), 'digest-derived')
     binding.drive(controller)
     await controller.done
-    const logged = binding.liveAgent.session.events
+    const logged = binding.liveAgent.session.snapshotEvents()
       .find(item => item.type === 'user/message' && item.data.source.kind === 'user')
     expect(logged?.data.id).toBe('ag-ui:user:message-derived')
   })
@@ -328,7 +328,7 @@ describe('ThreadBinding frontend Tools', () => {
     binding.drive(result)
     await result.done
     expect(result.record.events.some(event => event.type === EventType.TOOL_CALL_RESULT)).toBe(false)
-    expect(binding.liveAgent.session.events.some(event => event.type === 'tool/result'
+    expect(binding.liveAgent.session.snapshotEvents().some(event => event.type === 'tool/result'
       && event.data.message.content[0].isError === true)).toBe(true)
     expect(result.record.events.at(-1)?.type).toBe(EventType.RUN_FINISHED)
   })
@@ -368,7 +368,7 @@ describe('ThreadBinding frontend Tools', () => {
     binding.drive(controller)
     await controller.done
     await binding.liveAgent.whenIdle()
-    expect(binding.liveAgent.session.events.some(event => event.type === 'tool/result'
+    expect(binding.liveAgent.session.snapshotEvents().some(event => event.type === 'tool/result'
       && event.data.message.content[0].isError === true
       && event.data.message.content[0].content.some(content => content.type === 'text'
         && content.text.includes('Invalid frontend Tool arguments')))).toBe(true)
@@ -386,7 +386,7 @@ describe('ThreadBinding frontend Tools', () => {
     await controller.done
     await vi.advanceTimersByTimeAsync(50)
     await binding.liveAgent.whenIdle()
-    expect(binding.liveAgent.session.events.some(event => event.type === 'tool/result'
+    expect(binding.liveAgent.session.snapshotEvents().some(event => event.type === 'tool/result'
       && event.data.message.content[0].isError === true)).toBe(true)
   })
 
@@ -503,7 +503,7 @@ describe('ThreadBinding shared state', () => {
       await controller.done
       expect(controller.record.events.at(-1)).toMatchObject({ code: 'AG_UI_EVENT_BUFFER_OVERFLOW' })
       expect(overflow.adapter.requests).toEqual([])
-      expect(overflow.binding.liveAgent.session.events.some(event => event.type === 'turn/start')).toBe(false)
+      expect(overflow.binding.liveAgent.session.snapshotEvents().some(event => event.type === 'turn/start')).toBe(false)
       expect(internals(overflow.binding).sharedStateActive).toBe(false)
     }
 
@@ -559,7 +559,7 @@ describe('ThreadBinding shared state', () => {
         { type: EventType.STATE_SNAPSHOT, snapshot: { value: 1 } },
       ])
       expect(controller.record.events.at(-1)).toMatchObject({ code: 'AG_UI_EVENT_BUFFER_OVERFLOW' })
-      expect(fixture.binding.liveAgent.session.events.some(event => event.type === 'tool/result'
+      expect(fixture.binding.liveAgent.session.snapshotEvents().some(event => event.type === 'tool/result'
         && event.data.message.content[0].isError === true)).toBe(true)
     }
   })
