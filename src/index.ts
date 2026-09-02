@@ -59,6 +59,8 @@ export interface Config {
   maxMessages?: number
   /** Maximum combined message JSON bytes. */
   maxMessageBytes?: number
+  /** Maximum non-text content parts in one user message. */
+  maxFilesPerMessage?: number
   /** Maximum context entries in one run. */
   maxContexts?: number
   /** Maximum combined context JSON bytes. */
@@ -103,6 +105,7 @@ export const Config: z<Config> = z.object({
   maxIdentityBytes: z.natural().default(256),
   maxMessages: z.natural().default(256),
   maxMessageBytes: z.natural().default(512 * 1024),
+  maxFilesPerMessage: z.natural().default(8),
   maxContexts: z.natural().default(32),
   maxContextBytes: z.natural().default(128 * 1024),
   maxTools: z.natural().default(32),
@@ -276,6 +279,7 @@ export class AgUiGateway extends Service implements AgUiAgentLookup {
       maxRunEventBytes: this.resolved.maxRunEventBytes,
       maxRunsPerThread: this.resolved.maxRunsPerThread,
       maxStateBytes: this.resolved.maxStateBytes,
+      maxFilesPerMessage: this.resolved.maxFilesPerMessage,
     }
     const binding = new ThreadBinding(this.ctx, principal, threadId, durableSessionId(principal, threadId, this.resolved.sharedSecret), options, (expired) => {
       /* v8 ignore next -- one binding instance owns its idle timer; stale callbacks are contained defensively. */

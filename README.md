@@ -117,6 +117,7 @@ A later Profile patch replaces the bundle row's complete `config`; include every
 | `maxIdentityBytes` | `256` | Maximum bytes per protocol or identity ID |
 | `maxMessages` | `256` | Maximum message count per request |
 | `maxMessageBytes` | `524288` | Maximum combined message JSON bytes |
+| `maxFilesPerMessage` | `8` | Maximum non-text parts in one user message |
 | `maxContexts` | `32` | Maximum context entry count |
 | `maxContextBytes` | `131072` | Maximum combined context JSON bytes |
 | `maxTools` | `32` | Maximum browser Tool count |
@@ -134,6 +135,8 @@ A later Profile patch replaces the bundle row's complete `config`; include every
 `agentPreset` composes each thread's agent from the host's agent-presets roster (mount the roster plugin before this Gateway); an unresolvable id fails Gateway activation loudly, a per-tenant entry overrides the deployment default for that tenant's threads, and a resumed thread keeps the composition its own durable session recorded. Without `agentPreset`, threads keep the host composition unchanged.
 
 Each new thread uses `<workspaceRoot>/<sessionId>` as its DSH session working directory and receives an `uploads` subdirectory. The directory is named by the durable session id, so client thread ids stay off disk. Relative and `~` paths are expanded at activation. When the Host provides `workspaceRegistry`, the Gateway also registers new thread workspaces for DSH Web.
+
+User messages accept ordered AG-UI content parts. Text stays text. URL parts must reference `<prefix>/threads/<threadId>/files/<encodeURIComponent(name)>` in that thread's `uploads` directory. Images become native DSH image blocks when the Host provides attachment storage; other uploaded files become `Attached file: uploads/<name> (...)` text so the Agent can open them from its workspace. Inline data is accepted only for the four supported image media types.
 
 `maxRunEvents` must retain at least the mandatory opening and terminal events. `maxRunEventBytes` bounds the complete retained Run record, including `RUN_STARTED` and its terminal event, and must be large enough for the configured maximum identity length. A non-loopback DSH WebServer requires `allowNonLoopback: true`. Prefer a loopback Gateway behind a same-host authenticated BFF.
 
@@ -306,7 +309,7 @@ The separate [`dsh-ag-ui-adapter`](packages/dsh-ag-ui-adapter) package is the em
 ## HTTP and run semantics
 
 - Requests must be `POST application/json` and match AG-UI `RunAgentInput`.
-- A normal run accepts one new text user message.
+- A normal run accepts one new user message with text or supported multimodal content parts.
 - A continuation accepts one or more new frontend ToolMessages for one pending DSH turn.
 - One DSH turn can cross multiple AG-UI HTTP runs.
 - Each run emits one `RUN_STARTED` and exactly one `RUN_FINISHED` or `RUN_ERROR`.

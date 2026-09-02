@@ -117,6 +117,7 @@ lease.dispose()
 | `maxIdentityBytes` | `256` | 每个 protocol 或 identity ID 的最大 bytes |
 | `maxMessages` | `256` | 每次 request 的最大 message 数量 |
 | `maxMessageBytes` | `524288` | Message JSON 最大总 bytes |
+| `maxFilesPerMessage` | `8` | 每条 user message 的最大非文本 part 数量 |
 | `maxContexts` | `32` | 最大 context entry 数量 |
 | `maxContextBytes` | `131072` | Context JSON 最大总 bytes |
 | `maxTools` | `32` | 最大 browser Tool 数量 |
@@ -134,6 +135,8 @@ lease.dispose()
 `agentPreset` 让每个线程的 agent 从宿主的 agent-presets roster 组合而来（需在本 Gateway 之前挂载 roster 插件）；无法解析的 id 会让 Gateway 激活响亮失败，按租户条目覆盖该租户线程的部署默认值，而恢复的线程保持其持久 session 自己记录的组合。不配置 `agentPreset` 时，线程保持宿主组合不变。
 
 每个新 thread 使用 `<workspaceRoot>/<sessionId>` 作为 DSH session working directory，并创建 `uploads` 子目录。目录按 durable session id 命名，客户端 thread id 不会落盘。Gateway 激活时会展开相对路径和 `~` 路径。Host 提供 `workspaceRegistry` 时，新 workspace 也会注册到 DSH Web。
+
+User message 支持有序的 AG-UI content parts。Text part 保持为文本。URL part 必须引用当前 thread `uploads` 目录中的 `<prefix>/threads/<threadId>/files/<encodeURIComponent(name)>`。Host 提供 attachment storage 时，图片会成为原生 DSH image block；其他上传文件会成为 `Attached file: uploads/<name> (...)` 文本，Agent 可从 workspace 打开它们。Inline data 仅支持四种图片 media type。
 
 `maxRunEvents` 必须至少容纳 mandatory opening 与 terminal events。`maxRunEventBytes` 会限制包含 `RUN_STARTED` 和 terminal event 在内的完整 retained Run record，并且必须足以容纳已配置的最大 identity length。非 loopback DSH WebServer 需要设置 `allowNonLoopback: true`。推荐把 Gateway 保持在 loopback，并放在同 Host 的 authenticated BFF 后面。
 
@@ -306,7 +309,7 @@ Upstream Dojo 的 integration registry 是静态源码，目前没有 `deepseek-
 ## HTTP 与 run 语义
 
 - Request 必须为 `POST application/json`，并且符合 AG-UI `RunAgentInput`。
-- 普通 run 接受一条新的 text user message。
+- 普通 run 接受一条包含 text 或受支持 multimodal content parts 的新 user message。
 - Continuation 接受属于一个 pending DSH turn 的一条或多条新 frontend ToolMessages。
 - 一个 DSH turn 可以跨多个 AG-UI HTTP runs。
 - 每个 run 发出一个 `RUN_STARTED` 和恰好一个 `RUN_FINISHED` 或 `RUN_ERROR`。
