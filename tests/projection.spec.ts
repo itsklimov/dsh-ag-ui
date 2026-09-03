@@ -359,7 +359,7 @@ describe('SessionProjection shared state', () => {
 })
 
 describe('SessionProjection history snapshot', () => {
-  it('derives the full history, skipping injected context, unmapped ids, and empty text', () => {
+  it('derives the full history, including tool-only assistant messages in durable order', () => {
     const projection = new SessionProjection(sessionId, presenter)
     const events = [
       event('user/message', {
@@ -379,12 +379,64 @@ describe('SessionProjection history snapshot', () => {
       }),
       textMessage(''),
       textMessage('hello back'),
+      event('assistant/message', {
+        turn: 1,
+        step: 2,
+        message: createAssistantMessage({
+          content: [
+            { type: 'text', text: 'I will render it.' },
+            {
+              type: 'tool-call',
+              id: ToolCallId('call-1'),
+              name: 'render_a2ui',
+              arguments: '{"surfaceId":"overview","components":[]}',
+            },
+          ],
+          source: { provider: 'scripted', model: 'scripted' },
+        }),
+      }),
       toolResult('call-1'),
     ]
     expect(projection.messagesSnapshot(events, id => (id === 'user-1' ? 'client-user-1' : undefined))).toEqual([
       { id: 'client-user-1', role: 'user', content: 'hello' },
       { id: messageId, role: 'assistant', content: 'hello back' },
+      {
+        id: 'ag-ui:ag-ui-projection-test:1:2:assistant',
+        role: 'assistant',
+        content: 'I will render it.',
+        toolCalls: [{
+          id: 'call-1',
+          type: 'function',
+          function: {
+            name: 'render_a2ui',
+            arguments: '{"surfaceId":"overview","components":[]}',
+          },
+        }],
+      },
       { id: 'ag-ui:ag-ui-projection-test:call-1:result', role: 'tool', toolCallId: 'call-1', content: 'result of call-1' },
+    ])
+  })
+
+  it('keeps a tool-only assistant message so its result is never orphaned', () => {
+    const projection = new SessionProjection(sessionId, presenter)
+    const announcement = assistantToolAnnouncement(1, 1)
+
+    expect(projection.messagesSnapshot([announcement, toolResult('announced-0')], () => undefined)).toEqual([
+      {
+        id: messageId,
+        role: 'assistant',
+        toolCalls: [{
+          id: 'announced-0',
+          type: 'function',
+          function: { name: 'ui_action', arguments: '{}' },
+        }],
+      },
+      {
+        id: 'ag-ui:ag-ui-projection-test:announced-0:result',
+        role: 'tool',
+        toolCallId: 'announced-0',
+        content: 'result of announced-0',
+      },
     ])
   })
 })

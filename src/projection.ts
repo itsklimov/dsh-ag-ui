@@ -1,4 +1,11 @@
-import { EventType, type BaseEvent, type CustomEvent, type InputContent, type Message as AgUiMessage } from '@ag-ui/core'
+import {
+  EventType,
+  type AssistantMessage as AgUiAssistantMessage,
+  type BaseEvent,
+  type CustomEvent,
+  type InputContent,
+  type Message as AgUiMessage,
+} from '@ag-ui/core'
 import type { ContentBlock, ToolResultBlock } from '@deepseek-ai/dsh-llm'
 import { type SessionId, type SessionEvent, type TurnEndReason } from '@deepseek-ai/dsh-session'
 import {
@@ -333,11 +340,13 @@ export class SessionProjection {
         messages.push({ id, role: 'user', content: userContent(event.data) })
       } else if (event.type === 'assistant/message') {
         const text = joinText(event.data.message.content)
-        if (text === '') continue
+        const toolCalls = assistantToolCalls(event.data.message.content)
+        if (text === '' && toolCalls.length === 0) continue
         messages.push({
           id: assistantMessageId(this.sessionId, event.data.turn, event.data.step),
           role: 'assistant',
-          content: text,
+          ...(text === '' ? {} : { content: text }),
+          ...(toolCalls.length === 0 ? {} : { toolCalls }),
         })
       } else if (event.type === 'tool/result') {
         const block = event.data.message.content[0]
@@ -417,7 +426,17 @@ function announcedToolNames(content: readonly ContentBlock[]): string[] {
   return content.filter(block => block.type === 'tool-call').map(block => block.name)
 }
 
-/** Concatenate the text blocks of one message's content. */
+/** Rebuild the AG-UI assistant Tool calls announced by one durable DSH message. */
+function assistantToolCalls(content: readonly ContentBlock[]): NonNullable<AgUiAssistantMessage['toolCalls']> {
+  return content
+    .filter((block): block is Extract<ContentBlock, { type: 'tool-call' }> => block.type === 'tool-call')
+    .map(block => ({
+      id: String(block.id),
+      type: 'function',
+      function: { name: block.name, arguments: block.arguments },
+    }))
+}
+
 /** The content the client sent for one durable user message: its persisted AG-UI parts, else the logged text. */
 function userContent(message: { readonly content: readonly ContentBlock[], readonly source: unknown }): string | InputContent[] {
   const parts = (message.source as { agUiContent?: unknown }).agUiContent
@@ -425,6 +444,7 @@ function userContent(message: { readonly content: readonly ContentBlock[], reado
   return Array.isArray(parts) ? parts as InputContent[] : joinText(message.content)
 }
 
+/** Concatenate the text blocks of one message's content. */
 function joinText(content: readonly ContentBlock[]): string {
   return content
     .filter((block): block is Extract<ContentBlock, { type: 'text' }> => block.type === 'text')

@@ -39,6 +39,8 @@ import type { AgUiPrincipal, AgUiThreadIdentity } from './types.ts'
 const ADMITTED_ROLES: ReadonlySet<AgUiMessage['role']> = new Set(['user', 'tool'])
 const hasNewMessages = (messages: RunAgentInput['messages']): boolean => messages.some(message => ADMITTED_ROLES.has(message.role))
 
+/** Synthetic context Tool used by the official A2UI middleware for user actions. */
+const A2UI_ACTION_TOOL_NAME = 'log_a2ui_event'
 const FRONTEND_TOOL_NAME = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/
 const FILE_URL_PATH = /\/threads\/([^/]+)\/files\/([^/]+)$/
 const IMAGE_MEDIA_TYPES = new Set<string>(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
@@ -69,6 +71,20 @@ export interface ThreadOptions {
 
 interface AcceptedMessage {
   readonly role: 'user' | 'tool'
+  readonly digest: string
+}
+
+interface A2UIUserAction {
+  readonly name?: string
+  readonly surfaceId?: string
+  readonly sourceComponentId?: string
+  readonly context?: Record<string, unknown>
+  readonly timestamp?: string
+}
+
+interface A2UIActionContinuation {
+  readonly action: A2UIUserAction
+  readonly result: AgUiToolMessage
   readonly digest: string
 }
 
@@ -376,7 +392,7 @@ export class ThreadBinding {
       return
     }
     try {
-      const admission = this.classifyMessages(controller.input.messages)
+      const admission = this.classifyMessages(controller.input)
       if (admission.kind === 'sync') {
         this.emitHistory(controller, [])
         controller.success()
@@ -392,6 +408,11 @@ export class ThreadBinding {
         return
       }
 
+      if (admission.kind === 'action') {
+        this.driveA2UIAction(controller, admission.action)
+        return
+      }
+
       const turn = this.continuationTurn(admission.messages)
       controller.turn = turn
       this.emitHistory(controller, [])
@@ -401,6 +422,7 @@ export class ThreadBinding {
       this.assertStateToolAvailable(baseline)
       this.stagedTools = controller.input.tools
       this.injectContext(controller.input, baseline)
+      if (admission.action !== undefined) this.injectA2UIAction(admission.action)
       this.commitSharedStateBaseline(baseline)
       for (const message of admission.messages) {
         const pending = this.pendingCalls.get(message.toolCallId)
@@ -608,13 +630,15 @@ export class ThreadBinding {
   }
 
   /** Sort a run's new messages: user messages open a turn, Tool results continue one, none at all only synchronizes history. */
-  private classifyMessages(messages: AgUiMessage[]):
+  private classifyMessages(input: RunAgentInput):
     | { kind: 'sync' }
     | { kind: 'user'; messages: AgUiUserMessage[] }
-    | { kind: 'tools'; messages: AgUiToolMessage[] } {
+    | { kind: 'action'; action: A2UIActionContinuation }
+    | { kind: 'tools'; messages: AgUiToolMessage[]; action?: A2UIActionContinuation } {
+    const action = a2uiActionContinuation(input)
     const users: AgUiUserMessage[] = []
     const tools: AgUiToolMessage[] = []
-    for (const message of messages) {
+    for (const message of input.messages) {
       if (message.role !== 'user' && message.role !== 'tool') continue
       const digest = valueDigest(message)
       const accepted = this.acceptedMessages.get(message.id)
@@ -625,6 +649,7 @@ export class ThreadBinding {
         continue
       }
       if (message.role === 'tool') {
+        if (action?.result.id === message.id) continue
         if (this.pendingCalls.has(message.toolCallId)) tools.push(message)
         else if (this.projection.consumeServerResult(message.toolCallId)) {
           this.acceptedMessages.set(message.id, { role: 'tool', digest })
@@ -638,9 +663,52 @@ export class ThreadBinding {
     if (users.length > 0 && tools.length > 0) {
       throw new AgUiGatewayError('INVALID_MESSAGE_BATCH', 'A run cannot mix new user messages with new frontend Tool results.')
     }
+    if (users.length > 0 && action !== undefined) {
+      throw new AgUiGatewayError('INVALID_MESSAGE_BATCH', 'A run cannot mix new user messages with an A2UI user action.')
+    }
     if (users.length > 0) return { kind: 'user', messages: users }
-    if (tools.length > 0) return { kind: 'tools', messages: tools }
+    if (tools.length > 0) return { kind: 'tools', messages: tools, ...(action === undefined ? {} : { action }) }
+    if (action !== undefined) return { kind: 'action', action }
     return { kind: 'sync' }
+  }
+
+  /** Start a new DSH turn for one validated middleware user action. */
+  private driveA2UIAction(controller: RunController, action: A2UIActionContinuation): void {
+    this.assertUserRunReady()
+    this.emitHistory(controller, [])
+    /* v8 ignore next -- the shared history-budget tests cover this guard; the action path reuses the same controller settlement. */
+    if (controller.record.state !== 'active') return
+    const baseline = this.prepareSharedState(controller.input)
+    this.assertStateToolAvailable(baseline)
+    this.applyFrontendTools(controller.input.tools)
+    this.injectContext(controller.input, baseline)
+    this.commitSharedStateBaseline(baseline)
+    const message = this.a2uiActionMessage(action)
+    controller.messageId = String(message.id)
+    this.liveAgent.followup(message)
+  }
+
+  /** Add an action to the next step of the still-open render turn. */
+  private injectA2UIAction(action: A2UIActionContinuation): void {
+    this.liveAgent.inject(this.a2uiActionMessage(action))
+  }
+
+  /** Materialize one accepted action as durable DSH plugin context. */
+  private a2uiActionMessage(action: A2UIActionContinuation): UserMessage {
+    this.acceptedMessages.set(action.result.id, { role: 'tool', digest: action.digest })
+    return createUserMessage({
+      // forwardedProps is already bounded at HTTP admission; keep its complete validated action in durable model context
+      content: [{
+        type: 'text',
+        text: `${action.result.content}\n\nA2UI user action JSON: ${canonicalJsonStringify(action.action)}`,
+      }],
+      source: {
+        kind: 'plugin',
+        plugin: 'ag-ui',
+        form: 'notice',
+        summary: 'A2UI user action',
+      },
+    })
   }
 
   private continuationTurn(messages: AgUiToolMessage[]): number {
@@ -1022,6 +1090,102 @@ function sessionPersistenceOf(ctx: Context): SessionPersistenceLike | undefined 
 /** Narrow a JSON object without accepting arrays or null. */
 function isUnknownRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** Validate the exact synthetic pair appended by the official A2UI middleware. */
+function a2uiActionContinuation(input: RunAgentInput): A2UIActionContinuation | undefined {
+  const action = readA2UIUserAction(input.forwardedProps)
+  if (action === undefined) return undefined
+  const assistant = input.messages.at(-2)
+  const result = input.messages.at(-1)
+  const call = assistant?.role === 'assistant' && assistant.toolCalls?.length === 1
+    ? assistant.toolCalls[0]
+    : undefined
+  if (assistant?.role !== 'assistant'
+    || assistant.content !== ''
+    || call?.type !== 'function'
+    || call.function.name !== A2UI_ACTION_TOOL_NAME
+    || result?.role !== 'tool'
+    || result.toolCallId !== call.id) {
+    throw new AgUiGatewayError(
+      'INVALID_A2UI_ACTION',
+      'The A2UI user action is missing its official synthetic Tool-call pair.',
+    )
+  }
+  let argumentsValue: unknown
+  try {
+    argumentsValue = JSON.parse(call.function.arguments)
+  } catch (error) {
+    throw new AgUiGatewayError('INVALID_A2UI_ACTION', 'The A2UI user action arguments are invalid.', 400, error)
+  }
+  if (!isDeepStrictEqual(argumentsValue, action) || result.content !== formatA2UIActionResult(action)) {
+    throw new AgUiGatewayError('INVALID_A2UI_ACTION', 'The A2UI user action does not match its synthetic Tool-call pair.')
+  }
+  return { action, result, digest: valueDigest(result) }
+}
+
+/** Read the bounded user-action shape carried in forwardedProps by A2UIMiddleware. */
+function readA2UIUserAction(forwardedProps: RunAgentInput['forwardedProps']): A2UIUserAction | undefined {
+  if (!isUnknownRecord(forwardedProps) || !Object.hasOwn(forwardedProps, 'a2uiAction')) return undefined
+  const envelope = forwardedProps.a2uiAction
+  if (!isUnknownRecord(envelope)
+    || !Object.hasOwn(envelope, 'userAction')
+    || Object.keys(envelope).some(key => key !== 'userAction')) {
+    throw new AgUiGatewayError('INVALID_A2UI_ACTION', 'The A2UI action envelope is invalid.')
+  }
+  const value = envelope.userAction
+  const allowed = new Set(['name', 'surfaceId', 'sourceComponentId', 'context', 'timestamp'])
+  if (!isUnknownRecord(value) || Object.keys(value).some(key => !allowed.has(key))) {
+    throw new AgUiGatewayError('INVALID_A2UI_ACTION', 'The A2UI user action is invalid.')
+  }
+  for (const field of ['name', 'surfaceId', 'sourceComponentId', 'timestamp'] as const) {
+    if (value[field] !== undefined && typeof value[field] !== 'string') {
+      throw new AgUiGatewayError('INVALID_A2UI_ACTION', `The A2UI user action ${field} must be a string.`)
+    }
+  }
+  if (value.context !== undefined && !isUnknownRecord(value.context)) {
+    throw new AgUiGatewayError('INVALID_A2UI_ACTION', 'The A2UI user action context must be an object.')
+  }
+  const name = typeof value.name === 'string' ? value.name : undefined
+  const surfaceId = typeof value.surfaceId === 'string' ? value.surfaceId : undefined
+  const sourceComponentId = typeof value.sourceComponentId === 'string' ? value.sourceComponentId : undefined
+  const context = isUnknownRecord(value.context) ? value.context : undefined
+  const timestamp = typeof value.timestamp === 'string' ? value.timestamp : undefined
+  return {
+    ...(name === undefined ? {} : { name }),
+    ...(surfaceId === undefined ? {} : { surfaceId }),
+    ...(sourceComponentId === undefined ? {} : { sourceComponentId }),
+    ...(context === undefined ? {} : { context: structuredClone(context) }),
+    ...(timestamp === undefined ? {} : { timestamp }),
+  }
+}
+
+/** Match the official middleware's model-facing Tool result text exactly. */
+function formatA2UIActionResult(action: A2UIUserAction): string {
+  const actionName = action.name ?? 'unknown_action'
+  const surfaceId = action.surfaceId ?? 'unknown_surface'
+  let message = `User performed action "${actionName}" on surface "${surfaceId}"`
+  if (action.sourceComponentId) message += ` (component: ${action.sourceComponentId})`
+  message += `. Context: ${action.context === undefined ? '{}' : JSON.stringify(action.context)}`
+  return message
+}
+
+/** Serialize JSON with recursively sorted object keys and locale-independent ordering. */
+function canonicalJsonStringify(value: unknown): string {
+  const encoded = JSON.stringify(canonicalizeJson(value))
+  /* v8 ignore next -- admitted A2UI actions and contexts are objects, which JSON.stringify always encodes. */
+  if (encoded === undefined) throw new TypeError('A2UI action values must be JSON-serializable')
+  return encoded
+}
+
+function canonicalizeJson(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalizeJson)
+  if (!isUnknownRecord(value)) return value
+  return Object.fromEntries(Object.entries(value)
+    .filter(([, nested]) => nested !== undefined)
+    // Object keys are unique, so the comparator cannot receive an equal pair.
+    .sort(([left], [right]) => left < right ? -1 : 1)
+    .map(([key, nested]) => [key, canonicalizeJson(nested)]))
 }
 
 /** Read the state-management Tool input after model-boundary validation. */

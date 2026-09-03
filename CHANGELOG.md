@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Native `@ag-ui/a2ui-middleware` render settlement and canonical validated user-action continuation across DSH turns.
 - Ordered AG-UI user content parts with workspace file references and native image admission; `MESSAGES_SNAPSHOT` returns the accepted parts unchanged, and inline data parts are rejected in favor of thread uploads.
 - Deterministic per-thread workspaces with DSH Web workspace registration when the Host provides it.
 - Authenticated streaming upload and download routes for per-thread workspace files.
@@ -16,6 +17,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- `MESSAGES_SNAPSHOT` now reconstructs assistant Tool calls from durable DSH messages, so Tool-only assistant messages and their results remain correlated after replay.
 - `MESSAGES_SNAPSHOT` now includes the user messages the run just admitted and is emitted only after admission, so a client keeps the message it sent and a rejected run leaves its history untouched.
 
 ### Changed

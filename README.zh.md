@@ -256,6 +256,8 @@ await agent.runAgent({
 
 模型调用 browser-owned Tool 时，当前 HTTP run 成功结束，但 DSH Tool Promise 仍然 pending。浏览器执行 Tool、追加一条使用相同 `toolCallId` 的标准 AG-UI ToolMessage，再开始另一个 run。Gateway resolve 原始 Promise，并继续同一个 DSH turn。
 
+官方 `@ag-ui/a2ui-middleware` 使用同一套原生 contract。它注入的 `render_a2ui` Tool 会 park，middleware 的 synthetic Tool result 会恢复同一个 DSH turn，之后的 `forwardedProps.a2uiAction` 会作为 durable plugin context 开启下一个 turn。该 context 同时保留可读的 middleware result 与完整、已校验的 action JSON（包括可选 timestamp），并递归排序对象键。Gateway 只接受 middleware 的精确有界 action envelope，以及末尾匹配的 `log_a2ui_event` assistant/Tool pair；它不会把任意 assistant history 导入 DSH。
+
 普通 browser Tool result 不要通过 AG-UI `resume[]` 发送；该字段保留给显式 interrupt/HITL flow。
 
 ## Shared state
@@ -315,6 +317,7 @@ Upstream Dojo 的 integration registry 是静态源码，目前没有 `deepseek-
 - Request 必须为 `POST application/json`，并且符合 AG-UI `RunAgentInput`。
 - 普通 run 接受一条或多条包含 text 或受支持 multimodal content parts 的新 user message，它们按到达顺序进入同一个 DSH turn。没有新消息的 run 只返回历史 snapshot。
 - Continuation 接受属于一个 pending DSH turn 的一条或多条新 frontend ToolMessages。
+- 官方 A2UI user-action run 接受经过校验的 `a2uiAction` envelope 与匹配的 synthetic `log_a2ui_event` pair；它也可以同时携带 pending `render_a2ui` result。
 - 一个 DSH turn 可以跨多个 AG-UI HTTP runs。
 - 每个 run 发出一个 `RUN_STARTED` 和恰好一个 `RUN_FINISHED` 或 `RUN_ERROR`。
 - `runId` 是 exact-request idempotency key。已完成的相同 request 会重放 retained events，不再次驱动 DSH。

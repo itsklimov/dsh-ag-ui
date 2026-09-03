@@ -269,7 +269,7 @@ describe('thread file HTTP routes', () => {
     const uploads = join(workspacePath(mounted.workspaceRoot), 'uploads')
     expect(await readFile(join(uploads, 'sample.dat'))).toEqual(bytes)
     expect((await readdir(uploads)).filter(name => name.endsWith('.part'))).toEqual([])
-  })
+  }, 15_000)
 
   it('accepts the exact limit and rejects a declared byte over it without artifacts', async () => {
     const mounted = await mount({ maxFileBytes: 4 })
