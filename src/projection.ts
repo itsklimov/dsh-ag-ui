@@ -351,11 +351,13 @@ export class SessionProjection {
       } else if (event.type === 'tool/result') {
         const block = event.data.message.content[0]
         const callId = String(block.toolCallId)
+        const metadata = isUnknownRecord(event.data.meta) ? structuredClone(event.data.meta) : undefined
         messages.push({
           id: resultMessageId(this.sessionId, callId),
           role: 'tool',
           toolCallId: callId,
           content: renderToolResult(block),
+          ...(metadata === undefined ? {} : { metadata }),
         })
       }
     }
@@ -435,6 +437,10 @@ function assistantToolCalls(content: readonly ContentBlock[]): NonNullable<AgUiA
       type: 'function',
       function: { name: block.name, arguments: block.arguments },
     }))
+}
+
+function isUnknownRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 /** The content the client sent for one durable user message: its persisted AG-UI parts, else the logged text. */

@@ -318,6 +318,7 @@ The separate [`dsh-ag-ui-adapter`](packages/dsh-ag-ui-adapter) package is the em
 - A normal run accepts one or more new user messages with text or supported multimodal content parts; they join one DSH turn in arrival order. A run without new messages only returns the history snapshot; it never waits behind an active run.
 - A continuation accepts one or more new frontend ToolMessages for one pending DSH turn.
 - An official A2UI user-action run accepts its validated `a2uiAction` envelope and matching synthetic `log_a2ui_event` pair; it may also carry the pending `render_a2ui` result.
+- Standard object metadata on an authenticated pending frontend Tool result is persisted through native DSH presentation metadata and returned by later message snapshots; results without metadata remain unchanged on the wire.
 - One DSH turn can cross multiple AG-UI HTTP runs.
 - Each run emits one `RUN_STARTED` and exactly one `RUN_FINISHED` or `RUN_ERROR`.
 - `runId` is an exact-request idempotency key. Completed identical requests replay retained events without driving DSH again.

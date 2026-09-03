@@ -121,13 +121,14 @@ describe('official A2UI middleware contract', () => {
         'ä': { z: 6, a: 7 },
         a: { z: 2, a: 3 },
         rows: [{ z: 4, a: 5 }],
+        numeric: { 2: 'two', 10: 'ten' },
       },
       surfaceId: 'canonical-surface',
       name: 'confirm',
       sourceComponentId: 'confirm-button',
     }
-    const nativeContext = '{"z":1,"ä":{"z":6,"a":7},"a":{"z":2,"a":3},"rows":[{"z":4,"a":5}]}'
-    const canonicalContext = '{"a":{"a":3,"z":2},"rows":[{"a":5,"z":4}],"z":1,"ä":{"a":7,"z":6}}'
+    const nativeContext = '{"z":1,"ä":{"z":6,"a":7},"a":{"z":2,"a":3},"rows":[{"z":4,"a":5}],"numeric":{"2":"two","10":"ten"}}'
+    const canonicalContext = '{"a":{"a":3,"z":2},"numeric":{"10":"ten","2":"two"},"rows":[{"a":5,"z":4}],"z":1,"ä":{"a":7,"z":6}}'
     const canonicalAction = `{"context":${canonicalContext},"name":"confirm","sourceComponentId":"confirm-button","surfaceId":"canonical-surface","timestamp":"2026-09-02T13:00:00.000Z"}`
     const resultContent = `User performed action "confirm" on surface "canonical-surface" (component: confirm-button). Context: ${nativeContext}`
 
@@ -167,6 +168,12 @@ describe('official A2UI middleware contract', () => {
       .use(new A2UIMiddleware({ injectA2UITool: true, defaultCatalogId: 'catalog.test' }))
     agent.addMessage({ id: 'a2ui-durable-user', role: 'user', content: 'Render durably.' })
     await runAgentEvents(agent, 'a2ui-durable-render', [])
+    const presentationMetadata = { a2ui: { ownerToolCallId: 'durable-presentation-owner' } }
+    // Pinned middleware does not stamp the upcoming native marker yet; preserve its real synthetic result and add only that metadata.
+    agent.setMessages(agent.messages.map(message => message.role === 'tool'
+      && message.toolCallId === 'durable-render-call'
+      ? { ...message, metadata: presentationMetadata }
+      : message))
     await runAgentEvents(agent, 'a2ui-durable-result', [])
     const actionEvents = await runWithAction(agent, 'a2ui-durable-action', action)
     const before = actionEvents.find(event => event.type === EventType.MESSAGES_SNAPSHOT)
@@ -175,6 +182,10 @@ describe('official A2UI middleware contract', () => {
       (message.role === 'assistant' && message.toolCalls?.some(call => call.id === 'durable-render-call'))
       || (message.role === 'tool' && message.toolCallId === 'durable-render-call'))
     expect(canonicalBefore).toHaveLength(2)
+    expect(canonicalBefore[1]).toMatchObject({ role: 'tool', metadata: presentationMetadata })
+    const durableRenderResult = first.ctx.agents.list()[0]?.session.snapshotEvents().find(event =>
+      event.type === 'tool/result' && String(event.data.message.content[0].toolCallId) === 'durable-render-call')
+    expect(durableRenderResult).toMatchObject({ data: { meta: presentationMetadata } })
 
     await first.ctx.fiber.dispose()
     await new Promise(resolve => setTimeout(resolve, 300))
@@ -201,7 +212,7 @@ describe('official A2UI middleware contract', () => {
       block.type === 'text' && block.text.includes(`A2UI user action JSON: ${canonicalAction}`)))).toBe(true)
   })
 
-  it.todo('cross-repo gate: A2UIMiddleware reconstructs ACTIVITY_SNAPSHOT from the recovered canonical render transcript')
+  it.todo('cross-repo gate: updated A2UIMiddleware collapses cold replay by recovered presentation-owner metadata')
 
   it('injects an action into the same DSH turn when it arrives with the pending render result', async () => {
     const harness = await mountGateway([

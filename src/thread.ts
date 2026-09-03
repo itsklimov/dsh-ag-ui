@@ -26,6 +26,7 @@ import {
   type ToolDefinition,
   type ToolRunContext,
 } from '@deepseek-ai/dsh-tools'
+import { isJsonValue, type JsonValue } from '@deepseek-ai/dsh-util-values'
 import { isDeepStrictEqual } from 'node:util'
 import { AgUiGatewayError } from './errors.ts'
 import { jsonBytes, valueDigest } from './json.ts'
@@ -95,8 +96,13 @@ interface FrontendToolRegistration {
 
 interface PendingFrontendCall {
   readonly turn: number
-  resolve(value: string): void
+  resolve(value: FrontendToolResultValue): void
   reject(error: Error): void
+}
+
+interface FrontendToolResultValue {
+  readonly content: string
+  readonly presentationMeta?: JsonValue
 }
 
 interface PreparedFrontendTool {
@@ -414,6 +420,11 @@ export class ThreadBinding {
       }
 
       const turn = this.continuationTurn(admission.messages)
+      for (const message of admission.messages) {
+        if (message.error === undefined && message.metadata !== undefined && !isJsonValue(message.metadata)) {
+          throw new AgUiGatewayError('INVALID_TOOL_RESULT_METADATA', 'Frontend Tool result metadata must be lossless JSON.')
+        }
+      }
       controller.turn = turn
       this.emitHistory(controller, [])
       /* v8 ignore next -- a continuation whose history snapshot overflowed the run budget is already settled; the user path covers the same guard. */
@@ -432,7 +443,12 @@ export class ThreadBinding {
         }
         this.acceptedMessages.set(message.id, { role: 'tool', digest: valueDigest(message) })
         this.projection.markAwaitingResult(message.toolCallId)
-        if (message.error === undefined) pending.resolve(message.content)
+        if (message.error === undefined) {
+          pending.resolve({
+            content: message.content,
+            ...(message.metadata === undefined ? {} : { presentationMeta: structuredClone(message.metadata) }),
+          })
+        }
         else pending.reject(new Error(`Frontend Tool failed: ${message.error}`))
       }
       // a partial resolution leaves calls parked; finish so the client can answer the rest
@@ -886,9 +902,22 @@ export class ThreadBinding {
       description: item.tool.description,
       parameters: item.schema,
       output: {
-        schema: { type: 'string' },
+        schema: {
+          type: 'object',
+          properties: {
+            content: { type: 'string' },
+            presentationMeta: { type: 'object', additionalProperties: true },
+          },
+          required: ['content'],
+          additionalProperties: false,
+        },
         render(_args, value) {
-          return [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value) }]
+          const result = value as unknown as FrontendToolResultValue
+          return [{ type: 'text', text: result.content }]
+        },
+        presentationMeta(_args, value) {
+          const result = value as unknown as FrontendToolResultValue
+          return result.presentationMeta ?? null
         },
       },
       presentCall: args => ({ card: 'generic', title: item.tool.description, rawInput: args }),
@@ -903,7 +932,7 @@ export class ThreadBinding {
     schema: ObjectJsonSchema,
     args: unknown,
     exec: ToolRunContext,
-  ): Promise<string> {
+  ): Promise<FrontendToolResultValue> {
     const violations = validateJsonSchemaValue(schema, args, '')
     if (violations.length > 0) throw new Error(`Invalid frontend Tool arguments: ${violations.join('; ')}`)
     const callId = String(exec.callId)
@@ -914,7 +943,7 @@ export class ThreadBinding {
     if (active !== undefined && active.turn !== lifecycle.turn) throw new Error('Frontend Tool call has no active AG-UI run')
     this.projection.markParked(callId, lifecycle)
 
-    const deferred = Promise.withResolvers<string>()
+    const deferred = Promise.withResolvers<FrontendToolResultValue>()
     let settled = false
     const settle = (operation: () => void): void => {
       /* v8 ignore next -- late timeout, abort, or browser completion is an idempotent no-op. */
@@ -1172,20 +1201,31 @@ function formatA2UIActionResult(action: A2UIUserAction): string {
 
 /** Serialize JSON with recursively sorted object keys and locale-independent ordering. */
 function canonicalJsonStringify(value: unknown): string {
-  const encoded = JSON.stringify(canonicalizeJson(value))
-  /* v8 ignore next -- admitted A2UI actions and contexts are objects, which JSON.stringify always encodes. */
+  const encoded = writeCanonicalJson(value)
+  /* v8 ignore next -- admitted A2UI actions and contexts are objects, which the writer always encodes. */
   if (encoded === undefined) throw new TypeError('A2UI action values must be JSON-serializable')
   return encoded
 }
 
-function canonicalizeJson(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalizeJson)
-  if (!isUnknownRecord(value)) return value
-  return Object.fromEntries(Object.entries(value)
-    .filter(([, nested]) => nested !== undefined)
-    // Object keys are unique, so the comparator cannot receive an equal pair.
-    .sort(([left], [right]) => left < right ? -1 : 1)
-    .map(([key, nested]) => [key, canonicalizeJson(nested)]))
+function writeCanonicalJson(value: unknown): string | undefined {
+  if (Array.isArray(value)) {
+    const items = Array.from(value, item => {
+      const encoded = writeCanonicalJson(item)
+      /* v8 ignore next -- parsed AG-UI JSON arrays cannot contain undefined, but canonical JSON represents sparse JS values as null. */
+      return encoded ?? 'null'
+    })
+    return `[${items.join(',')}]`
+  }
+  if (!isUnknownRecord(value)) return JSON.stringify(value)
+  const entries: string[] = []
+  const keys = Object.keys(value).sort((left, right) => left < right ? -1 : 1)
+  for (const key of keys) {
+    const encoded = writeCanonicalJson(value[key])
+    /* v8 ignore next -- parsed AG-UI JSON objects cannot contain undefined, but canonical JSON omits such JS properties. */
+    if (encoded === undefined) continue
+    entries.push(`${JSON.stringify(key)}:${encoded}`)
+  }
+  return `{${entries.join(',')}}`
 }
 
 /** Read the state-management Tool input after model-boundary validation. */

@@ -318,6 +318,7 @@ Upstream Dojo 的 integration registry 是静态源码，目前没有 `deepseek-
 - 普通 run 接受一条或多条包含 text 或受支持 multimodal content parts 的新 user message，它们按到达顺序进入同一个 DSH turn。没有新消息的 run 只返回历史 snapshot。
 - Continuation 接受属于一个 pending DSH turn 的一条或多条新 frontend ToolMessages。
 - 官方 A2UI user-action run 接受经过校验的 `a2uiAction` envelope 与匹配的 synthetic `log_a2ui_event` pair；它也可以同时携带 pending `render_a2ui` result。
+- 已认证 pending frontend Tool result 上的标准对象 metadata 会通过原生 DSH presentation metadata 持久化，并由后续 message snapshot 返回；没有 metadata 的结果在 wire 上保持不变。
 - 一个 DSH turn 可以跨多个 AG-UI HTTP runs。
 - 每个 run 发出一个 `RUN_STARTED` 和恰好一个 `RUN_FINISHED` 或 `RUN_ERROR`。
 - `runId` 是 exact-request idempotency key。已完成的相同 request 会重放 retained events，不再次驱动 DSH。

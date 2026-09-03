@@ -63,7 +63,7 @@ function assistantToolAnnouncement(turn: number, count: number): SessionEvent {
   })
 }
 
-function toolResult(callId: string, isError = false): SessionEvent {
+function toolResult(callId: string, isError = false, meta?: unknown): SessionEvent {
   return event('tool/result', {
     turn: 1,
     step: 1,
@@ -72,6 +72,7 @@ function toolResult(callId: string, isError = false): SessionEvent {
       isError,
       content: [{ type: 'text', text: `result of ${callId}` }],
     }),
+    ...(meta === undefined ? {} : { meta }),
   })
 }
 
@@ -395,7 +396,7 @@ describe('SessionProjection history snapshot', () => {
           source: { provider: 'scripted', model: 'scripted' },
         }),
       }),
-      toolResult('call-1'),
+      toolResult('call-1', false, { a2ui: { ownerToolCallId: 'presentation-owner' } }),
     ]
     expect(projection.messagesSnapshot(events, id => (id === 'user-1' ? 'client-user-1' : undefined))).toEqual([
       { id: 'client-user-1', role: 'user', content: 'hello' },
@@ -413,7 +414,13 @@ describe('SessionProjection history snapshot', () => {
           },
         }],
       },
-      { id: 'ag-ui:ag-ui-projection-test:call-1:result', role: 'tool', toolCallId: 'call-1', content: 'result of call-1' },
+      {
+        id: 'ag-ui:ag-ui-projection-test:call-1:result',
+        role: 'tool',
+        toolCallId: 'call-1',
+        content: 'result of call-1',
+        metadata: { a2ui: { ownerToolCallId: 'presentation-owner' } },
+      },
     ])
   })
 
@@ -436,6 +443,32 @@ describe('SessionProjection history snapshot', () => {
         role: 'tool',
         toolCallId: 'announced-0',
         content: 'result of announced-0',
+      },
+    ])
+  })
+
+  it('does not publish non-object DSH presentation metadata as AG-UI message metadata', () => {
+    const projection = new SessionProjection(sessionId, presenter)
+    const announcement = assistantToolAnnouncement(1, 2)
+
+    const messages = projection.messagesSnapshot([
+      announcement,
+      toolResult('announced-0', false, null),
+      toolResult('announced-1', false, []),
+    ], () => undefined)
+
+    expect(messages.filter(message => message.role === 'tool')).toEqual([
+      {
+        id: 'ag-ui:ag-ui-projection-test:announced-0:result',
+        role: 'tool',
+        toolCallId: 'announced-0',
+        content: 'result of announced-0',
+      },
+      {
+        id: 'ag-ui:ag-ui-projection-test:announced-1:result',
+        role: 'tool',
+        toolCallId: 'announced-1',
+        content: 'result of announced-1',
       },
     ])
   })
