@@ -42,6 +42,10 @@ const hasNewMessages = (messages: RunAgentInput['messages']): boolean => message
 
 /** Synthetic context Tool used by the official A2UI middleware for user actions. */
 const A2UI_ACTION_TOOL_NAME = 'log_a2ui_event'
+/** Default name of the render Tool the official A2UI middleware injects into a run. */
+const A2UI_RENDER_TOOL_NAME = 'render_a2ui'
+/** The result the middleware would synthesize for a render call; the Gateway returns it inside the run instead. */
+const A2UI_RENDERED_RESULT = JSON.stringify({ status: 'rendered' })
 const FRONTEND_TOOL_NAME = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/
 const FILE_URL_PATH = /\/threads\/([^/]+)\/files\/([^/]+)$/
 const IMAGE_MEDIA_TYPES = new Set<string>(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
@@ -153,6 +157,8 @@ export class ThreadBinding {
   private readonly acceptedMessages = new Map<string, AcceptedMessage>()
   private readonly frontendTools = new Map<string, FrontendToolRegistration>()
   private stagedTools: AgUiTool[] | undefined
+  /** Render Tool the A2UI middleware flagged for the current run; its calls settle without a browser result. */
+  private a2uiRenderTool: string | undefined
   private readonly pendingCalls = new Map<string, PendingFrontendCall>()
   private readonly runLedger = new Map<string, RunRecord>()
   private readonly userMessageIds = new Map<string, string>()
@@ -390,6 +396,7 @@ export class ThreadBinding {
       throw new AgUiGatewayError('RUN_NOT_ACTIVE', 'The AG-UI run lost its reservation.', 409)
     }
     controller.start()
+    this.a2uiRenderTool = a2uiRenderToolName(controller.input.forwardedProps)
     // a restarted thread reports its interrupted turn once, after its history, so the client can drop parked calls
     if (this.interrupted) {
       this.interrupted = false
@@ -923,7 +930,9 @@ export class ThreadBinding {
       presentCall: args => ({ card: 'generic', title: item.tool.description, rawInput: args }),
       // parking holds no server-side resource, so calls of one step may overlap
       isConcurrencySafe: () => true,
-      execute: (args, exec) => this.parkFrontendTool(item.tool.name, item.schema, args, exec),
+      execute: (args, exec) => item.tool.name === this.a2uiRenderTool
+        ? settleA2UIRender(item.schema, args)
+        : this.parkFrontendTool(item.tool.name, item.schema, args, exec),
     }
   }
 
@@ -933,8 +942,7 @@ export class ThreadBinding {
     args: unknown,
     exec: ToolRunContext,
   ): Promise<FrontendToolResultValue> {
-    const violations = validateJsonSchemaValue(schema, args, '')
-    if (violations.length > 0) throw new Error(`Invalid frontend Tool arguments: ${violations.join('; ')}`)
+    assertFrontendToolArgs(schema, args)
     const callId = String(exec.callId)
     const lifecycle = this.projection.lifecycleOf(callId)
     if (lifecycle?.kind !== 'backend' || lifecycle.name !== name) throw new Error('Frontend Tool call has no DSH call position')
@@ -1119,6 +1127,25 @@ function sessionPersistenceOf(ctx: Context): SessionPersistenceLike | undefined 
 /** Narrow a JSON object without accepting arrays or null. */
 function isUnknownRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function assertFrontendToolArgs(schema: ObjectJsonSchema, args: unknown): void {
+  const violations = validateJsonSchemaValue(schema, args, '')
+  if (violations.length > 0) throw new Error(`Invalid frontend Tool arguments: ${violations.join('; ')}`)
+}
+
+/** Answer a middleware-injected render call at once: the middleware renders from the streamed arguments and never sends a browser result. */
+function settleA2UIRender(schema: ObjectJsonSchema, args: unknown): Promise<FrontendToolResultValue> {
+  assertFrontendToolArgs(schema, args)
+  return Promise.resolve({ content: A2UI_RENDERED_RESULT })
+}
+
+/** Name of the render Tool A2UIMiddleware flags in forwardedProps; `true` selects its default name. */
+function a2uiRenderToolName(forwardedProps: RunAgentInput['forwardedProps']): string | undefined {
+  if (!isUnknownRecord(forwardedProps) || !Object.hasOwn(forwardedProps, 'injectA2UITool')) return undefined
+  const value = forwardedProps.injectA2UITool
+  if (value === true) return A2UI_RENDER_TOOL_NAME
+  return typeof value === 'string' ? value : undefined
 }
 
 /** Validate the exact synthetic pair appended by the official A2UI middleware. */

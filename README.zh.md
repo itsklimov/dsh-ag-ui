@@ -256,7 +256,7 @@ await agent.runAgent({
 
 模型调用 browser-owned Tool 时，当前 HTTP run 成功结束，但 DSH Tool Promise 仍然 pending。浏览器执行 Tool、追加一条使用相同 `toolCallId` 的标准 AG-UI ToolMessage，再开始另一个 run。Gateway resolve 原始 Promise，并继续同一个 DSH turn。
 
-官方 `@ag-ui/a2ui-middleware` 使用同一套原生 contract。它注入的 `render_a2ui` Tool 会 park，middleware 的 synthetic Tool result 会恢复同一个 DSH turn，之后的 `forwardedProps.a2uiAction` 会作为 durable plugin context 开启下一个 turn。该 context 同时保留可读的 middleware result 与完整、已校验的 action JSON（包括可选 timestamp），并递归排序对象键。Gateway 只接受 middleware 的精确有界 action envelope，以及末尾匹配的 `log_a2ui_event` assistant/Tool pair；它不会把任意 assistant history 导入 DSH。
+官方 `@ag-ui/a2ui-middleware` 使用同一套原生 contract。middleware 直接根据流式 Tool 参数渲染，从不发送浏览器 result，因此 Gateway 不会 park 它在 `forwardedProps.injectA2UITool` 中标记的 render Tool：该调用立即以 `{"status":"rendered"}` 结算，result 在同一个 run 内流出，DSH turn 继续执行。客户端自行注册的 render Tool 仍像其他浏览器 Tool 一样 park。之后的 `forwardedProps.a2uiAction` 会作为 durable plugin context 开启下一个 turn。该 context 同时保留可读的 middleware result 与完整、已校验的 action JSON（包括可选 timestamp），并递归排序对象键。Gateway 只接受 middleware 的精确有界 action envelope，以及末尾匹配的 `log_a2ui_event` assistant/Tool pair；它不会把任意 assistant history 导入 DSH。
 
 普通 browser Tool result 不要通过 AG-UI `resume[]` 发送；该字段保留给显式 interrupt/HITL flow。
 
@@ -317,7 +317,8 @@ Upstream Dojo 的 integration registry 是静态源码，目前没有 `deepseek-
 - Request 必须为 `POST application/json`，并且符合 AG-UI `RunAgentInput`。
 - 普通 run 接受一条或多条包含 text 或受支持 multimodal content parts 的新 user message，它们按到达顺序进入同一个 DSH turn。没有新消息的 run 只返回历史 snapshot。
 - Continuation 接受属于一个 pending DSH turn 的一条或多条新 frontend ToolMessages。
-- 官方 A2UI user-action run 接受经过校验的 `a2uiAction` envelope 与匹配的 synthetic `log_a2ui_event` pair；它也可以同时携带 pending `render_a2ui` result。
+- 官方 A2UI user-action run 接受经过校验的 `a2uiAction` envelope 与匹配的 synthetic `log_a2ui_event` pair；它也可以同时携带客户端自有 pending `render_a2ui` 调用的 result。
+- middleware 在 `forwardedProps.injectA2UITool` 中标记的 render Tool 会在其 run 内以 `{"status":"rendered"}` 结算，从不 park。
 - 已认证 pending frontend Tool result 上的标准对象 metadata 会通过原生 DSH presentation metadata 持久化，并由后续 message snapshot 返回；没有 metadata 的结果在 wire 上保持不变。
 - 一个 DSH turn 可以跨多个 AG-UI HTTP runs。
 - 每个 run 发出一个 `RUN_STARTED` 和恰好一个 `RUN_FINISHED` 或 `RUN_ERROR`。

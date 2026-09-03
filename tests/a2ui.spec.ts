@@ -2,9 +2,9 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { A2UIMiddleware, RENDER_A2UI_TOOL_NAME, type A2UIUserAction } from '@ag-ui/a2ui-middleware'
+import { A2UIMiddleware, RENDER_A2UI_TOOL, RENDER_A2UI_TOOL_NAME, type A2UIUserAction } from '@ag-ui/a2ui-middleware'
 import { HttpAgent } from '@ag-ui/client'
-import { EventType, type BaseEvent } from '@ag-ui/core'
+import { EventType, type BaseEvent, type Tool } from '@ag-ui/core'
 import { disposeMountedContexts, mountGateway, runAgentEvents } from './harness.ts'
 import { textResponse, toolResponse } from './scripted-adapter.ts'
 
@@ -23,11 +23,16 @@ afterEach(async () => {
 })
 
 /** Run through the official A2UI middleware while preserving its forwarded action contract. */
-async function runWithAction(agent: HttpAgent, runId: string, userAction: A2UIUserAction): Promise<BaseEvent[]> {
+async function runWithAction(
+  agent: HttpAgent,
+  runId: string,
+  userAction: A2UIUserAction,
+  tools: Tool[] = [],
+): Promise<BaseEvent[]> {
   const events: BaseEvent[] = []
   await agent.runAgent({
     runId,
-    tools: [],
+    tools,
     context: [],
     forwardedProps: { a2uiAction: { userAction } },
   }, {
@@ -37,7 +42,7 @@ async function runWithAction(agent: HttpAgent, runId: string, userAction: A2UIUs
 }
 
 describe('official A2UI middleware contract', () => {
-  it('settles a render, continues its DSH turn, and admits one bounded user action as the next turn', async () => {
+  it('settles an injected render inside its run and admits one bounded user action as the next turn', async () => {
     const harness = await mountGateway([
       toolResponse('render-call', RENDER_A2UI_TOOL_NAME, {
         surfaceId: 'overview',
@@ -54,14 +59,15 @@ describe('official A2UI middleware contract', () => {
     const renderEvents = await runAgentEvents(agent, 'a2ui-render', [])
     expect(renderEvents.some(event => event.type === EventType.ACTIVITY_SNAPSHOT)).toBe(true)
     expect(renderEvents.some(event => event.type === EventType.TOOL_CALL_RESULT
-      && event.toolCallId === 'render-call')).toBe(true)
-
-    const continuationEvents = await runAgentEvents(agent, 'a2ui-render-result', [])
-    expect(continuationEvents.some(event => event.type === EventType.TEXT_MESSAGE_CONTENT
+      && event.toolCallId === 'render-call'
+      && event.content === '{"status":"rendered"}')).toBe(true)
+    expect(renderEvents.some(event => event.type === EventType.TEXT_MESSAGE_CONTENT
       && event.delta === 'The overview is ready.')).toBe(true)
+    expect(renderEvents.at(-1)).toMatchObject({ type: EventType.RUN_FINISHED })
     const dshAgent = harness.ctx.agents.list()[0]
     expect(dshAgent?.status).toBe('idle')
     expect(dshAgent?.session.snapshotEvents().filter(event => event.type === 'turn/start')).toHaveLength(1)
+    expect(dshAgent?.session.snapshotEvents().filter(event => event.type === 'turn/end')).toHaveLength(1)
 
     const action = {
       name: 'refresh',
@@ -107,7 +113,49 @@ describe('official A2UI middleware contract', () => {
         expect.objectContaining({ role: 'tool', toolCallId: 'render-call' }),
       ]),
     })
+  })
 
+  it('settles a custom-named injected render Tool and accepts the next user message', async () => {
+    const harness = await mountGateway([
+      toolResponse('custom-render-call', 'draw_surface', {
+        surfaceId: 'custom',
+        components: [{ id: 'root', component: 'Text', text: 'Custom' }],
+      }),
+      textResponse('The custom surface is ready.'),
+      textResponse('The follow-up was handled.'),
+    ], SECRET)
+    const agent = new HttpAgent({ url: harness.url, headers: HEADERS, threadId: 'a2ui-custom-render' })
+      .use(new A2UIMiddleware({ injectA2UITool: 'draw_surface', defaultCatalogId: 'catalog.test' }))
+    agent.addMessage({ id: 'a2ui-custom-user-1', role: 'user', content: 'Draw a surface.' })
+
+    const renderEvents = await runAgentEvents(agent, 'a2ui-custom-render', [])
+    expect(renderEvents.some(event => event.type === EventType.TOOL_CALL_RESULT
+      && event.toolCallId === 'custom-render-call')).toBe(true)
+    expect(renderEvents.at(-1)).toMatchObject({ type: EventType.RUN_FINISHED })
+
+    // the client history now carries the settled render pair beside the new user message
+    agent.addMessage({ id: 'a2ui-custom-user-2', role: 'user', content: 'Now describe it.' })
+    const followUpEvents = await runAgentEvents(agent, 'a2ui-custom-follow-up', [])
+    expect(followUpEvents.some(event => event.type === EventType.TEXT_MESSAGE_CONTENT
+      && event.delta === 'The follow-up was handled.')).toBe(true)
+    expect(harness.adapter.requests).toHaveLength(3)
+    expect(harness.ctx.agents.list()[0]?.session.snapshotEvents().filter(event => event.type === 'turn/start')).toHaveLength(2)
+  })
+
+  it('ignores an injectA2UITool flag that is neither true nor a Tool name', async () => {
+    const harness = await mountGateway([textResponse('No render Tool was flagged.')], SECRET)
+    const agent = new HttpAgent({ url: harness.url, headers: HEADERS, threadId: 'a2ui-bogus-flag' })
+    agent.addMessage({ id: 'a2ui-bogus-user', role: 'user', content: 'Hello.' })
+    const events: BaseEvent[] = []
+    await agent.runAgent({
+      runId: 'a2ui-bogus-flag-run',
+      tools: [],
+      context: [],
+      forwardedProps: { injectA2UITool: 7 },
+    }, { onEvent: ({ event }) => { events.push(event) } })
+
+    expect(events.at(-1)).toMatchObject({ type: EventType.RUN_FINISHED })
+    expect(harness.adapter.requests).toHaveLength(1)
   })
 
   it('accepts the native middleware pair and stores unsorted nested context canonically', async () => {
@@ -168,13 +216,6 @@ describe('official A2UI middleware contract', () => {
       .use(new A2UIMiddleware({ injectA2UITool: true, defaultCatalogId: 'catalog.test' }))
     agent.addMessage({ id: 'a2ui-durable-user', role: 'user', content: 'Render durably.' })
     await runAgentEvents(agent, 'a2ui-durable-render', [])
-    const presentationMetadata = { a2ui: { ownerToolCallId: 'durable-presentation-owner' } }
-    // Pinned middleware does not stamp the upcoming native marker yet; preserve its real synthetic result and add only that metadata.
-    agent.setMessages(agent.messages.map(message => message.role === 'tool'
-      && message.toolCallId === 'durable-render-call'
-      ? { ...message, metadata: presentationMetadata }
-      : message))
-    await runAgentEvents(agent, 'a2ui-durable-result', [])
     const actionEvents = await runWithAction(agent, 'a2ui-durable-action', action)
     const before = actionEvents.find(event => event.type === EventType.MESSAGES_SNAPSHOT)
     if (before?.type !== EventType.MESSAGES_SNAPSHOT) throw new Error('expected the pre-restart message snapshot')
@@ -182,10 +223,7 @@ describe('official A2UI middleware contract', () => {
       (message.role === 'assistant' && message.toolCalls?.some(call => call.id === 'durable-render-call'))
       || (message.role === 'tool' && message.toolCallId === 'durable-render-call'))
     expect(canonicalBefore).toHaveLength(2)
-    expect(canonicalBefore[1]).toMatchObject({ role: 'tool', metadata: presentationMetadata })
-    const durableRenderResult = first.ctx.agents.list()[0]?.session.snapshotEvents().find(event =>
-      event.type === 'tool/result' && String(event.data.message.content[0].toolCallId) === 'durable-render-call')
-    expect(durableRenderResult).toMatchObject({ data: { meta: presentationMetadata } })
+    expect(canonicalBefore[1]).toMatchObject({ role: 'tool', toolCallId: 'durable-render-call', content: '{"status":"rendered"}' })
 
     await first.ctx.fiber.dispose()
     await new Promise(resolve => setTimeout(resolve, 300))
@@ -214,7 +252,7 @@ describe('official A2UI middleware contract', () => {
 
   it.todo('cross-repo gate: updated A2UIMiddleware collapses cold replay by recovered presentation-owner metadata')
 
-  it('injects an action into the same DSH turn when it arrives with the pending render result', async () => {
+  it('injects an action into the same DSH turn when a client-owned render Tool is still pending', async () => {
     const harness = await mountGateway([
       toolResponse('render-and-action-call', RENDER_A2UI_TOOL_NAME, {
         surfaceId: 'combined',
@@ -222,16 +260,20 @@ describe('official A2UI middleware contract', () => {
       }),
       textResponse('The render result and action were handled together.'),
     ], SECRET)
+    // the client registers the render Tool itself, so the Gateway parks it like any browser-owned Tool
     const agent = new HttpAgent({ url: harness.url, headers: HEADERS, threadId: 'a2ui-combined-thread' })
-      .use(new A2UIMiddleware({ injectA2UITool: true, defaultCatalogId: 'catalog.test' }))
+      .use(new A2UIMiddleware({ defaultCatalogId: 'catalog.test' }))
     agent.addMessage({ id: 'a2ui-combined-user', role: 'user', content: 'Render the combined surface.' })
-    await runAgentEvents(agent, 'a2ui-combined-render', [])
+    const renderEvents = await runAgentEvents(agent, 'a2ui-combined-render', [RENDER_A2UI_TOOL])
+    expect(harness.ctx.agents.list()[0]?.status).toBe('running')
+    expect(renderEvents.some(event => event.type === EventType.TOOL_CALL_RESULT
+      && event.toolCallId === 'render-and-action-call')).toBe(true)
 
     const events = await runWithAction(agent, 'a2ui-combined-action', {
       name: 'select',
       surfaceId: 'combined',
       timestamp: '2026-09-02T12:00:00.000Z',
-    })
+    }, [RENDER_A2UI_TOOL])
 
     expect(events.some(event => event.type === EventType.TEXT_MESSAGE_CONTENT
       && event.delta === 'The render result and action were handled together.')).toBe(true)
