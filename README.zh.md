@@ -219,20 +219,23 @@ BFF 持有 login、session、CSRF、tenant policy、resource authorization、aud
 
 AG-UI gateway 只是众多带 HTTP remote 的 Host-plane service 之一；其他 DSH 服务插件也可以在同一个环回 webserver 上挂载路由。同一条规则覆盖所有这些 remote：浏览器永远不直接访问 Host。每个 remote 都经应用 backend 暴露在应用自己的路由之下，采用上文"认证 → 授权 → 转发"的形态并附带该服务期望的凭据。Host 端口本身保持 loopback，也不向客户端公开。
 
-## 浏览器客户端
+## AG-UI 客户端
 
-在 frontend application 中安装官方 client。支持协议范围（`>=0.0.58 <0.1.0`）内的任意版本均可；网关不要求 client 精确锁版：
+在 BFF 中同时安装 gateway package 与官方 client。支持协议范围（`>=0.0.58 <0.1.0`）内的任意 client 版本均可；网关不要求精确锁版：
 
 ```bash
-pnpm add @ag-ui/client
+pnpm add dsh-ag-ui @ag-ui/client
 ```
+
+使用 gateway 自己提供的 client companion，避免长对话反复发送已完成的 transcript。Agent 仍保留完整本地 history，供渲染器与 middleware 使用；只有 HTTP input 会缩减为最后一个 assistant boundary 之后的 user 与 Tool messages。官方 A2UI action run 还会原样保留 middleware 追加的最后一对 synthetic messages。
 
 在每个 run 中发送页面相关的 browser Tools 与当前 context：
 
 ```ts
-import { HttpAgent, randomUUID } from '@ag-ui/client'
+import { randomUUID } from '@ag-ui/client'
+import { DshHttpAgent } from 'dsh-ag-ui/client'
 
-const agent = new HttpAgent({
+const agent = new DshHttpAgent({
   url: '/api/agent',
   threadId: 'application-thread-123',
 })
@@ -253,6 +256,8 @@ await agent.runAgent({
   forwardedProps: {},
 })
 ```
+
+该 stateless 选择会保留 admission 前被拒绝的 messages。如果一连串 run 已被 Gateway 接受、却都在产生 assistant message 前失败，client 就没有 assistant boundary 可用，这些已确认的 user messages 仍可能留在 outgoing tail 中。Gateway 会继续按 ID 去重；若要让这个少见的 failure path 也严格 bounded，需要新增显式 acknowledgement cursor。
 
 模型调用 browser-owned Tool 时，当前 HTTP run 成功结束，但 DSH Tool Promise 仍然 pending。浏览器执行 Tool、追加一条使用相同 `toolCallId` 的标准 AG-UI ToolMessage，再开始另一个 run。Gateway resolve 原始 Promise，并继续同一个 DSH turn。
 
