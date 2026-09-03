@@ -221,10 +221,10 @@ AG-UI gateway 只是众多带 HTTP remote 的 Host-plane service 之一；其他
 
 ## AG-UI 客户端
 
-在 BFF 中同时安装 gateway package 与官方 client。支持协议范围（`>=0.0.58 <0.1.0`）内的任意 client 版本均可；网关不要求精确锁版：
+Gateway wire protocol 接受支持范围（`>=0.0.58 <0.1.0`）内的官方 client，并不要求精确锁版。Gateway 自带的 `DshHttpAgent` companion 已针对 `@ag-ui/client ~0.0.59` 测试并声明 peer：
 
 ```bash
-pnpm add dsh-ag-ui @ag-ui/client
+pnpm add dsh-ag-ui @ag-ui/client@~0.0.59
 ```
 
 使用 gateway 自己提供的 client companion，避免长对话反复发送已完成的 transcript。Agent 仍保留完整本地 history，供渲染器与 middleware 使用；只有 HTTP input 会缩减为最后一个 assistant boundary 之后的 user 与 Tool messages。官方 A2UI action run 还会原样保留 middleware 追加的最后一对 synthetic messages。
@@ -376,7 +376,9 @@ Backend Tool result 会发出 `TOOL_CALL_RESULT`。Frontend Tool result 不在 A
 
 | 组件 | 支持版本 |
 | --- | --- |
-| AG-UI core/client/encoder | `>=0.0.58 <0.1.0`（`~0.0.58`；已用 `0.0.58` 验证） |
+| AG-UI wire protocol | `>=0.0.58 <0.1.0`（已用 `0.0.58` 验证） |
+| AG-UI client companion | `~0.0.59` |
+| AG-UI core/encoder runtime | `~0.0.59` |
 | Node.js | `^22.19.0` 或 `>=24.0.0` |
 | DeepSeek Harness | `0.1.2-alpha.3`（精确的 developer-preview peers） |
 

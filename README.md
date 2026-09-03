@@ -221,10 +221,10 @@ The AG-UI gateway is one Host-plane service with an HTTP remote; other DSH servi
 
 ## AG-UI client
 
-Install the gateway package beside the official client in the BFF. Any client release in the supported protocol range (`>=0.0.58 <0.1.0`) works; the gateway never requires an exact client pin:
+The Gateway wire protocol accepts official clients in the supported range (`>=0.0.58 <0.1.0`) and does not require an exact pin. The Gateway-owned `DshHttpAgent` companion is tested and peered with `@ag-ui/client ~0.0.59`:
 
 ```bash
-pnpm add dsh-ag-ui @ag-ui/client
+pnpm add dsh-ag-ui @ag-ui/client@~0.0.59
 ```
 
 Use the Gateway-owned client companion so long conversations do not resend their settled transcript. The agent still retains its complete local history for rendering and middleware; only the HTTP input is narrowed to user and Tool messages after the last assistant boundary. Official A2UI action runs also retain the middleware's exact final synthetic pair.
@@ -376,7 +376,9 @@ An unexpected HTTP disconnect cancels the Gateway-owned DSH turn. `HttpAgent` do
 
 | Component | Supported version |
 | --- | --- |
-| AG-UI core/client/encoder | `>=0.0.58 <0.1.0` (`~0.0.58`; tested with `0.0.58`) |
+| AG-UI wire protocol | `>=0.0.58 <0.1.0` (tested with `0.0.58`) |
+| AG-UI client companion | `~0.0.59` |
+| AG-UI core/encoder runtime | `~0.0.59` |
 | Node.js | `^22.19.0` or `>=24.0.0` |
 | DeepSeek Harness | `0.1.2-alpha.3` (exact developer-preview peers) |
 

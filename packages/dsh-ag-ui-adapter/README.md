@@ -21,7 +21,7 @@ No child process exists until the first run needs one: `run()` starts the micro-
 ## Usage
 
 ```bash
-pnpm add dsh-ag-ui-adapter @ag-ui/client dsh-ag-ui \
+pnpm add dsh-ag-ui-adapter @ag-ui/client@~0.0.59 dsh-ag-ui \
   @deepseek-ai/cordis@4.0.2 \
   @deepseek-ai/dsh-host-webserver@0.1.2-alpha.3 \
   @deepseek-ai/dsh-agent@0.1.2-alpha.3 \
@@ -122,7 +122,7 @@ The timeout variables must be positive integers in canonical form (`1500`, not `
 
 | Component | Supported version |
 | --- | --- |
-| AG-UI client | `>=0.0.58 <0.1.0` (`~0.0.58`; tested with `0.0.58`) |
+| AG-UI client | `~0.0.59` |
 | Node.js | `^22.19.0 || >=24.0.0` |
 | DeepSeek Harness | `0.1.2-alpha.3` (exact developer-preview peers) |
 

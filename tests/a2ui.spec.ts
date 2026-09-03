@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { A2UIMiddleware, RENDER_A2UI_TOOL, RENDER_A2UI_TOOL_NAME, type A2UIUserAction } from '@ag-ui/a2ui-middleware'
 import { HttpAgent } from '@ag-ui/client'
 import { EventType, type BaseEvent, type Tool } from '@ag-ui/core'
+import { DshHttpAgent } from '../src/client.ts'
 import { disposeMountedContexts, mountGateway, runAgentEvents } from './harness.ts'
 import { textResponse, toolResponse } from './scripted-adapter.ts'
 
@@ -52,7 +53,7 @@ describe('official A2UI middleware contract', () => {
       textResponse('The overview is ready.'),
       textResponse('The refresh action was handled.'),
     ], SECRET)
-    const agent = new HttpAgent({ url: harness.url, headers: HEADERS, threadId: 'a2ui-thread' })
+    const agent = new DshHttpAgent({ url: harness.url, headers: HEADERS, threadId: 'a2ui-thread' })
       .use(new A2UIMiddleware({ injectA2UITool: true, defaultCatalogId: 'catalog.test' }))
     agent.addMessage({ id: 'a2ui-user-1', role: 'user', content: 'Render an overview.' })
 
