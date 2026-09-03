@@ -265,11 +265,10 @@ export class AgUiGateway extends Service implements AgUiAgentLookup {
     const onClose = (): void => { gone.abort() }
     response.once('close', onClose)
     try {
-      await binding.awaitTurn(input.runId, gone.signal)
+      return await binding.admit(input, digest, gone.signal)
     } finally {
       response.off('close', onClose)
     }
-    return binding.reserveRun(input, digest)
   }
 
   private authenticate(request: IncomingMessage): AgUiPrincipal {

@@ -312,6 +312,37 @@ describe('AG-UI gateway lifecycle', () => {
     expect(ctx.agents.list()).toHaveLength(1)
   })
 
+  it('admits several queued runs of one thread without one losing the reservation', async () => {
+    const gate = Promise.withResolvers<StreamChunk[]>()
+    const { ctx, url } = await mount({}, [gate.promise, textResponse('second-reply'), textResponse('third-reply')])
+    const debug = vi.spyOn(ctx.logger, 'debug')
+    const first = postStreaming(url, input())
+    await first.started
+    const second = post(url, secondRun())
+    const third = post(url, input({ runId: 'run-3', messages: [{ id: 'message-3', role: 'user', content: 'third' }] }))
+    await vi.waitFor(() => {
+      expect(debug).toHaveBeenCalledWith(expect.stringContaining('run-2 waits for the active run'))
+      expect(debug).toHaveBeenCalledWith(expect.stringContaining('run-3 waits for the active run'))
+    })
+    gate.resolve(textResponse('first-reply'))
+    const results = await Promise.all([first.result(), second, third])
+    expect(results.map(result => result.status)).toEqual([200, 200, 200])
+    expect(results[2].body).toContain('third-reply')
+  })
+
+  it('serves a history-only run at once while another run is active', async () => {
+    const gate = Promise.withResolvers<StreamChunk[]>()
+    const { url } = await mount({}, [gate.promise])
+    const first = postStreaming(url, input())
+    await first.started
+    const history = await post(url, input({ runId: 'run-history', messages: [] }))
+    expect(history.status).toBe(200)
+    expect(history.body).toContain('MESSAGES_SNAPSHOT')
+    expect(history.body).toContain('RUN_FINISHED')
+    gate.resolve(textResponse('first-reply'))
+    expect((await first.result()).status).toBe(200)
+  })
+
   it('never admits a queued run whose client left before its turn', async () => {
     const gate = Promise.withResolvers<StreamChunk[]>()
     const { ctx, url } = await mount({}, [gate.promise, textResponse('third-reply')])

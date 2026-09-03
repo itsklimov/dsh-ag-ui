@@ -35,6 +35,10 @@ import { RunController, type RunRecord } from './run.ts'
 import type { ToolPresenter } from './tool-view.ts'
 import type { AgUiPrincipal, AgUiThreadIdentity } from './types.ts'
 
+/** Roles a run may admit: user messages open a turn, Tool results continue one. Every other run only reads history. */
+const ADMITTED_ROLES: ReadonlySet<AgUiMessage['role']> = new Set(['user', 'tool'])
+const hasNewMessages = (messages: RunAgentInput['messages']): boolean => messages.some(message => ADMITTED_ROLES.has(message.role))
+
 const FRONTEND_TOOL_NAME = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/
 const FILE_URL_PATH = /\/threads\/([^/]+)\/files\/([^/]+)$/
 const IMAGE_MEDIA_TYPES = new Set<string>(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
@@ -284,11 +288,17 @@ export class ThreadBinding {
   }
 
   /**
-   * Wait until this thread can admit another run, so runs of one thread follow each
-   * other in arrival order instead of failing while an earlier run is still active.
+   * Admit one run. A history-only run is served at once, even beside an active run, because it
+   * only reads the session log. Any other run waits until this thread is free and reserves it in
+   * the same tick, so two queued runs never race for one reservation.
    * @param signal - aborted once the waiting client is gone; that run is never admitted.
    */
-  async awaitTurn(runId: string, signal: AbortSignal): Promise<void> {
+  async admit(input: RunAgentInput, digest: string, signal: AbortSignal): Promise<RunController> {
+    if (!hasNewMessages(input.messages)) {
+      this.assertLive()
+      return this.newController(input, digest)
+    }
+    const runId = input.runId
     const session = String(this.sessionId)
     const left = new Promise<never>((_resolve, reject) => {
       signal.addEventListener('abort', () => {
@@ -306,13 +316,13 @@ export class ThreadBinding {
         this.ctx.logger.debug(`ag-ui: run ${runId} waits for the Agent of session ${session} to settle`)
         await Promise.race([this.liveAgent.whenIdle(), left])
       } else {
-        return
+        return this.reserveRun(input, digest)
       }
     }
   }
 
   /**
-   * Reserve one run before accepting DSH input; callers serialize through {@link awaitTurn} first.
+   * Reserve one run before accepting DSH input; HTTP callers serialize through {@link admit}.
    * @param input - validated AG-UI request.
    * @param digest - exact request-body digest.
    * @returns the sole active controller for this thread.
@@ -338,14 +348,8 @@ export class ThreadBinding {
     if (this.runLedger.size >= this.options.maxRunsPerThread) {
       throw new AgUiGatewayError('RUN_LEDGER_FULL', 'The AG-UI thread run ledger is full.', 429)
     }
-    const record: RunRecord = { digest, events: [], state: 'active', bytes: 0 }
-    this.runLedger.set(input.runId, record)
-    const controller = new RunController(
-      input,
-      record,
-      this.options.maxRunEvents,
-      this.options.maxRunEventBytes,
-    )
+    const controller = this.newController(input, digest)
+    this.runLedger.set(input.runId, controller.record)
     this.activeRun = controller
     void controller.done.then(() => {
       /* v8 ignore next -- terminal settlement runs before another HTTP run can reserve this binding. */
@@ -356,11 +360,13 @@ export class ThreadBinding {
   }
 
   /**
-   * Start a reserved run after its SSE sink is attached.
-   * @param controller - exact controller returned by {@link reserveRun}.
+   * Start an admitted run after its SSE sink is attached.
+   * @param controller - exact controller returned by {@link admit} or {@link reserveRun}; only a history-only run may run unreserved.
    */
   drive(controller: RunController): void {
-    if (this.activeRun !== controller) throw new AgUiGatewayError('RUN_NOT_ACTIVE', 'The AG-UI run lost its reservation.', 409)
+    if (this.activeRun !== controller && hasNewMessages(controller.input.messages)) {
+      throw new AgUiGatewayError('RUN_NOT_ACTIVE', 'The AG-UI run lost its reservation.', 409)
+    }
     controller.start()
     // a restarted thread reports its interrupted turn once, after its history, so the client can drop parked calls
     if (this.interrupted) {
@@ -588,6 +594,11 @@ export class ThreadBinding {
     this.handle = undefined
     /* v8 ignore next -- initialized live bindings own a handle; repeated disposal returned above. */
     if (handle !== undefined) await handle.dispose()
+  }
+
+  private newController(input: RunAgentInput, digest: string): RunController {
+    const record: RunRecord = { digest, events: [], state: 'active', bytes: 0 }
+    return new RunController(input, record, this.options.maxRunEvents, this.options.maxRunEventBytes)
   }
 
   private assertLive(): void {

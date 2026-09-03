@@ -313,12 +313,12 @@ The separate [`dsh-ag-ui-adapter`](packages/dsh-ag-ui-adapter) package is the em
 ## HTTP and run semantics
 
 - Requests must be `POST application/json` and match AG-UI `RunAgentInput`.
-- A normal run accepts one or more new user messages with text or supported multimodal content parts; they join one DSH turn in arrival order. A run without new messages only returns the history snapshot.
+- A normal run accepts one or more new user messages with text or supported multimodal content parts; they join one DSH turn in arrival order. A run without new messages only returns the history snapshot; it never waits behind an active run.
 - A continuation accepts one or more new frontend ToolMessages for one pending DSH turn.
 - One DSH turn can cross multiple AG-UI HTTP runs.
 - Each run emits one `RUN_STARTED` and exactly one `RUN_FINISHED` or `RUN_ERROR`.
 - `runId` is an exact-request idempotency key. Completed identical requests replay retained events without driving DSH again.
-- One thread drives one HTTP run at a time. A run that arrives while another is active waits for it and for the Agent turn to settle, so the runs of one thread are served in arrival order; a waiting client that disconnects is never admitted.
+- One thread drives one HTTP run at a time. A run that arrives while another is active waits for it and for the Agent turn to settle, so the runs of one thread are served in arrival order; a waiting client that disconnects is never admitted. Waiting and reservation happen together, so several queued runs all get their turn.
 - An active shared-state run emits its synchronization snapshot before model events.
 - V1 allows one frontend Tool call per DSH step.
 
