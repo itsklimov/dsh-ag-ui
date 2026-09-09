@@ -460,9 +460,9 @@ An unchanged Tool set preserves the Tool-schema prefix. Adding, removing, or cha
 
 - Live thread bindings, run replay buffers, and shared state are process-local; session history can persist through the Host persistence plugin.
 - Host restart resumes stored sessions with `agents.resume()`. Parked browser Tools are not recovered: an interrupted turn reports `THREAD_INTERRUPTED`, and shared state needs a new client baseline.
-- User input supports text and uploaded files; assistant messages and Tool results are projected as text.
+- Assistant messages and Tool results are projected as text; file deliverables use separate activities.
 - Partial SSE reconnect is not supported.
-- `STATE_DELTA`, AG-UI interrupt/HITL `resume[]`, reasoning events, and activity events are not adapted yet.
+- `STATE_DELTA`, AG-UI interrupt/HITL `resume[]`, and reasoning events are not adapted yet.
 - Shared-state updates use shallow top-level merge and do not provide versions, deep merge, or conflict resolution.
 
 ## Development

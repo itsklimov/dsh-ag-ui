@@ -453,9 +453,9 @@ Tool set 不变时保留 Tool-schema prefix。添加、删除或修改 Tool 可�
 
 - 活跃 thread 绑定、run 重放缓冲和 shared state 保存在进程内；会话历史可通过 Host 持久化插件保留。
 - Host 重启后通过 `agents.resume()` 恢复已保存的会话。不会恢复挂起的 browser Tool：被中断的回合返回 `THREAD_INTERRUPTED`，shared state 需要新的 client baseline。
-- User input 支持文本和已上传文件；assistant messages 和 Tool results 投影为文本。
+- Assistant messages 和 Tool results 投影为文本；文件交付物使用单独的 activity。
 - 不支持 partial SSE reconnect。
-- 尚未适配 `STATE_DELTA`、AG-UI interrupt/HITL `resume[]`、reasoning events 和 activity events。
+- 尚未适配 `STATE_DELTA`、AG-UI interrupt/HITL `resume[]` 和 reasoning events。
 - Shared-state update 使用 top-level shallow merge，不提供 version、deep merge 或 conflict resolution。
 
 ## 开发
