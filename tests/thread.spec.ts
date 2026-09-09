@@ -42,6 +42,7 @@ const OPTIONS = {
   maxRunEventBytes: 128 * 1024,
   maxRunsPerThread: 4,
   maxStateBytes: 64 * 1024,
+  maxFilesPerMessage: 8,
 } satisfies Omit<ThreadOptions, 'workspaceRoot'>
 
 function toolResponse(callId: string, args: object): StreamChunk[] {
@@ -204,7 +205,7 @@ describe('ThreadBinding run admission', () => {
     await settle(admitted)
   })
 
-  it('rejects conflicting message reuse and unsupported or mixed batches', async () => {
+  it('rejects conflicting message reuse and mixed batches', async () => {
     const { binding } = await mount([textResponse('first')])
     const first = binding.reserveRun(input('run-1', [{ id: 'message-1', role: 'user', content: 'hello' }]), 'digest-1')
     binding.drive(first)
@@ -215,15 +216,10 @@ describe('ThreadBinding run admission', () => {
     await conflict.done
     expect(conflict.record.events.at(-1)).toMatchObject({ code: 'MESSAGE_ID_CONFLICT' })
 
-    const nonText = binding.reserveRun(input('run-3', [{ id: 'message-2', role: 'user', content: [{ type: 'text', text: 'x' }] }]), 'digest-3')
-    binding.drive(nonText)
-    await nonText.done
-    expect(nonText.record.events.at(-1)).toMatchObject({ code: 'UNSUPPORTED_MESSAGE_CONTENT' })
-
-    const mixed = binding.reserveRun(input('run-3b', [
+    const mixed = binding.reserveRun(input('run-3', [
       { id: 'message-3', role: 'user', content: 'hello' },
       { id: 'tool-1', role: 'tool', toolCallId: 'missing', content: 'result' },
-    ]), 'digest-3b')
+    ]), 'digest-3')
     binding.drive(mixed)
     await mixed.done
     expect(mixed.record.events.at(-1)).toMatchObject({ code: 'UNKNOWN_TOOL_RESULT' })

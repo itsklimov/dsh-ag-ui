@@ -181,6 +181,7 @@ describe('tool view cards survive a durable restart', () => {
     maxRunEventBytes: 128 * 1024,
     maxRunsPerThread: 4,
     maxStateBytes: 64 * 1024,
+    maxFilesPerMessage: 8,
   } satisfies Omit<ThreadOptions, 'workspaceRoot'>
 
   it('re-derives the identical settled card in a resumed process', async () => {
