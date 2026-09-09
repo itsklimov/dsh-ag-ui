@@ -1,19 +1,25 @@
-import { LlmAttemptId } from '@deepseek-ai/dsh-llm'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { mkdtemp, rm, stat } from 'node:fs/promises'
+import { getEventListeners } from 'node:events'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { EventType, type RunAgentInput, type Tool } from '@ag-ui/core'
 import { Context } from '@deepseek-ai/cordis'
-import { ToolCallId, createAssistantMessage, createToolResultMessage, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { LlmAttemptId, ToolCallId, createAssistantMessage, createToolResultMessage, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { ScriptedAdapter, textResponse, toolResponse as scriptedToolResponse } from './scripted-adapter.ts'
 import { mountTestAgentCore } from './agent-core.ts'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { ThreadBinding, type ThreadOptions } from '../src/thread.ts'
+import { AgUiGatewayError } from '../src/errors.ts'
 
 const contexts: Context[] = []
+const workspaceRoots: string[] = []
 
 afterEach(async () => {
   vi.useRealTimers()
   for (const ctx of contexts.splice(0).reverse()) await ctx.fiber.dispose()
+  await Promise.all(workspaceRoots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 
 const TOOL: Tool = {
@@ -27,7 +33,7 @@ const TOOL: Tool = {
   },
 }
 
-const OPTIONS: ThreadOptions = {
+const OPTIONS = {
   provider: 'scripted',
   model: 'scripted',
   frontendToolTimeoutMs: 10_000,
@@ -36,7 +42,8 @@ const OPTIONS: ThreadOptions = {
   maxRunEventBytes: 128 * 1024,
   maxRunsPerThread: 4,
   maxStateBytes: 64 * 1024,
-}
+  maxFilesPerMessage: 8,
+} satisfies Omit<ThreadOptions, 'workspaceRoot'>
 
 function toolResponse(callId: string, args: object): StreamChunk[] {
   return scriptedToolResponse(callId, TOOL.name, args)
@@ -48,13 +55,15 @@ async function mount(script: StreamChunk[][] = [textResponse('ok')], overrides: 
   await mountTestAgentCore(ctx)
   const adapter = new ScriptedAdapter(script)
   ctx.llm.registerAdapter(['scripted'], adapter)
+  const workspaceRoot = await mkdtemp(join(tmpdir(), 'ag-ui-thread-workspaces-'))
+  workspaceRoots.push(workspaceRoot)
   let expired = 0
   const binding = new ThreadBinding(
     ctx,
     { tenantId: 'tenant-1', userId: 'user-1' },
     'thread-1',
     SessionId('ag-ui-thread-spec-session'),
-    { ...OPTIONS, ...overrides },
+    { ...OPTIONS, workspaceRoot, ...overrides },
     () => { expired++ },
   )
   await binding.initialize()
@@ -73,6 +82,54 @@ function input(runId: string, messages: RunAgentInput['messages'], tools: Tool[]
   }
 }
 
+describe('thread workspaces', () => {
+  it('creates a workspace without a registry and registers once when one is present', async () => {
+    const headless = await mount()
+    expect((await stat(headless.binding.workspace?.cwd ?? '')).isDirectory()).toBe(true)
+
+    const ctx = new Context()
+    contexts.push(ctx)
+    await mountTestAgentCore(ctx)
+    ctx.llm.registerAdapter(['scripted'], new ScriptedAdapter([textResponse('ok')]))
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'ag-ui-registry-workspaces-'))
+    workspaceRoots.push(workspaceRoot)
+    const create = vi.fn(async () => ({}))
+    ctx.provide('workspaceRegistry', { create })
+    const binding = new ThreadBinding(
+      ctx,
+      { tenantId: 'tenant-1', userId: 'user-1' },
+      'registry-thread',
+      SessionId('ag-ui-registry-session'),
+      { ...OPTIONS, workspaceRoot },
+      () => {},
+    )
+    await binding.initialize()
+    expect(create).toHaveBeenCalledOnce()
+    expect(create).toHaveBeenCalledWith(binding.workspace?.cwd, 'ag-ui-registry-session')
+    expect(binding.workspace?.cwd).not.toContain('registry-thread')
+  })
+
+  it('keeps workspace registry failures loud', async () => {
+    const ctx = new Context()
+    contexts.push(ctx)
+    await mountTestAgentCore(ctx)
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'ag-ui-registry-failure-'))
+    workspaceRoots.push(workspaceRoot)
+    const failure = new Error('workspace registry unavailable')
+    ctx.provide('workspaceRegistry', { create: async () => Promise.reject(failure) })
+    const binding = new ThreadBinding(
+      ctx,
+      { tenantId: 'tenant-1', userId: 'user-1' },
+      'registry-failure',
+      SessionId('ag-ui-registry-failure-session'),
+      { ...OPTIONS, workspaceRoot },
+      () => {},
+    )
+    await expect(binding.initialize()).rejects.toBe(failure)
+    expect(ctx.agents.list()).toHaveLength(0)
+  })
+})
+
 async function settle(controller: ReturnType<ThreadBinding['reserveRun']>): Promise<void> {
   controller.start()
   controller.error('TEST_DONE', 'done')
@@ -81,7 +138,7 @@ async function settle(controller: ReturnType<ThreadBinding['reserveRun']>): Prom
 
 interface TestPendingCall {
   turn: number
-  resolve(value: string): void
+  resolve(value: { content: string, presentationMeta?: unknown }): void
   reject(error: Error): void
 }
 
@@ -94,10 +151,11 @@ interface ThreadBindingInternals {
   interrupted: boolean
   applyFrontendTools(tools: Tool[]): void
   continuationTurn(messages: Extract<RunAgentInput['messages'][number], { role: 'tool' }>[]): number
-  parkFrontendTool(name: string, schema: Tool['parameters'], args: unknown, exec: ToolRunContext): Promise<string>
+  parkFrontendTool(name: string, schema: Tool['parameters'], args: unknown, exec: ToolRunContext): Promise<unknown>
   prepareSharedStateUpdate(args: unknown, exec: ToolRunContext): string
   onSessionEvent(event: SessionEvent): void
   onAgentError(error: unknown): void
+  failRunAdmission(controller: ReturnType<ThreadBinding['reserveRun']>, error: unknown): void
 }
 
 function internals(binding: ThreadBinding): ThreadBindingInternals {
@@ -115,7 +173,38 @@ function globalTool(name: string): ToolDefinition {
 }
 
 describe('ThreadBinding run admission', () => {
-  it('rejects conflicting message reuse and unsupported or mixed batches', async () => {
+  it.each([{ messages: [] }, { messages: [{ id: 'aborted-user', role: 'user' as const, content: 'must not run' }] }])('rejects a request already aborted before admission %#', async ({ messages }) => {
+    const { binding, adapter } = await mount()
+    const gone = new AbortController()
+    gone.abort()
+    await expect(binding.admit(input('aborted', messages), 'aborted', gone.signal)).rejects.toMatchObject({ code: 'CLIENT_DISCONNECTED' })
+    expect(binding.getRun('aborted')).toBeUndefined()
+    expect(adapter.requests).toHaveLength(0)
+  })
+
+  it('does not reserve a queued run aborted in the active-run settlement tick', async () => {
+    const { binding, adapter } = await mount()
+    const first = binding.reserveRun(input('first', [{ id: 'first-user', role: 'user', content: 'first' }]), 'first')
+    const gone = new AbortController()
+    const queued = binding.admit(input('queued', [{ id: 'queued-user', role: 'user', content: 'must not run' }]), 'queued', gone.signal)
+    first.start()
+    first.success()
+    gone.abort()
+    await expect(queued).rejects.toMatchObject({ code: 'CLIENT_DISCONNECTED' })
+    expect(binding.getRun('queued')).toBeUndefined()
+    expect(adapter.requests).toHaveLength(0)
+    expect(getEventListeners(gone.signal, 'abort')).toHaveLength(0)
+  })
+
+  it('releases the queue abort listener after admission', async () => {
+    const { binding } = await mount()
+    const gone = new AbortController()
+    const admitted = await binding.admit(input('admitted', [{ id: 'user', role: 'user', content: 'hello' }]), 'admitted', gone.signal)
+    expect(getEventListeners(gone.signal, 'abort')).toHaveLength(0)
+    await settle(admitted)
+  })
+
+  it('rejects conflicting message reuse and mixed batches', async () => {
     const { binding } = await mount([textResponse('first')])
     const first = binding.reserveRun(input('run-1', [{ id: 'message-1', role: 'user', content: 'hello' }]), 'digest-1')
     binding.drive(first)
@@ -126,23 +215,80 @@ describe('ThreadBinding run admission', () => {
     await conflict.done
     expect(conflict.record.events.at(-1)).toMatchObject({ code: 'MESSAGE_ID_CONFLICT' })
 
-    const nonText = binding.reserveRun(input('run-3', [{ id: 'message-2', role: 'user', content: [{ type: 'text', text: 'x' }] }]), 'digest-3')
-    binding.drive(nonText)
-    await nonText.done
-    expect(nonText.record.events.at(-1)).toMatchObject({ code: 'UNSUPPORTED_MESSAGE_CONTENT' })
-
-    const mixed = binding.reserveRun(input('run-4', [
+    const mixed = binding.reserveRun(input('run-3', [
       { id: 'message-3', role: 'user', content: 'hello' },
       { id: 'tool-1', role: 'tool', toolCallId: 'missing', content: 'result' },
-    ]), 'digest-4')
+    ]), 'digest-3')
     binding.drive(mixed)
     await mixed.done
     expect(mixed.record.events.at(-1)).toMatchObject({ code: 'UNKNOWN_TOOL_RESULT' })
 
-    const empty = binding.reserveRun(input('run-5', []), 'digest-5')
-    binding.drive(empty)
-    await empty.done
-    expect(empty.record.events.at(-1)).toMatchObject({ code: 'INVALID_MESSAGE_BATCH' })
+    // nothing new only synchronizes the client with the durable history
+    const sync = binding.reserveRun(input('run-4', []), 'digest-4')
+    binding.drive(sync)
+    await sync.done
+    expect(sync.record.events.map(event => event.type)).toEqual([
+      EventType.RUN_STARTED,
+      EventType.MESSAGES_SNAPSHOT,
+      EventType.RUN_FINISHED,
+    ])
+
+    internals(binding).pendingCalls.set('call-pending', { turn: 1, resolve() {}, reject() {} })
+    const pending = binding.reserveRun(input('run-5', [
+      { id: 'message-5', role: 'user', content: 'hello' },
+      { id: 'tool-5', role: 'tool', toolCallId: 'call-pending', content: 'result' },
+    ]), 'digest-5')
+    binding.drive(pending)
+    await pending.done
+    expect(pending.record.events.at(-1)).toMatchObject({ code: 'INVALID_MESSAGE_BATCH' })
+  })
+
+  it('admits every new user message of one run into the same turn and echoes them in the snapshot', async () => {
+    const { binding, adapter } = await mount([textResponse('both'), textResponse('again')])
+    // a run that failed before admission leaves its message in the client, so the next run carries two
+    const batch = binding.reserveRun(input('run-batch', [
+      { id: 'message-a', role: 'user', content: 'first' },
+      { id: 'message-b', role: 'user', content: 'second' },
+    ]), 'digest-batch')
+    binding.drive(batch)
+    await batch.done
+    await binding.liveAgent.whenIdle()
+    expect(batch.record.events.map(event => event.type)).toEqual([
+      EventType.RUN_STARTED,
+      EventType.MESSAGES_SNAPSHOT,
+      EventType.TEXT_MESSAGE_START,
+      EventType.TEXT_MESSAGE_CONTENT,
+      EventType.TEXT_MESSAGE_END,
+      EventType.MESSAGES_SNAPSHOT,
+      EventType.RUN_FINISHED,
+    ])
+    expect(batch.record.events[1]).toEqual({
+      type: EventType.MESSAGES_SNAPSHOT,
+      messages: [
+        { id: 'message-a', role: 'user', content: 'first' },
+        { id: 'message-b', role: 'user', content: 'second' },
+      ],
+    })
+    expect(adapter.requests).toHaveLength(1)
+    expect(JSON.stringify(adapter.requests[0]?.messages)).toMatch(/first.*second/)
+
+    const next = binding.reserveRun(input('run-next', [
+      { id: 'message-a', role: 'user', content: 'first' },
+      { id: 'message-b', role: 'user', content: 'second' },
+      { id: 'message-c', role: 'user', content: 'third' },
+    ]), 'digest-next')
+    binding.drive(next)
+    await next.done
+    expect(next.record.events[1]).toMatchObject({
+      type: EventType.MESSAGES_SNAPSHOT,
+      messages: [
+        { id: 'message-a', role: 'user' },
+        { id: 'message-b', role: 'user' },
+        { role: 'assistant', content: 'both' },
+        { id: 'message-c', role: 'user', content: 'third' },
+      ],
+    })
+    expect(next.record.events.at(-1)).toMatchObject({ type: EventType.RUN_FINISHED })
   })
 
   it('rejects unknown Tool results', async () => {
@@ -221,6 +367,50 @@ describe('ThreadBinding run admission', () => {
       { id: 'result-1', role: 'tool', toolCallId: 'call-1', content: 'one' },
       { id: 'result-2', role: 'tool', toolCallId: 'call-2', content: 'two' },
     ])).toThrow('different DSH turns')
+  })
+
+  it('validates every result metadata value before mutating a continuation batch', async () => {
+    const { binding } = await mount([])
+    const state = internals(binding)
+    const firstResolve = vi.fn()
+    const secondResolve = vi.fn()
+    state.pendingCalls.set('batch-call-1', { turn: 1, resolve: firstResolve, reject: vi.fn() })
+    state.pendingCalls.set('batch-call-2', { turn: 1, resolve: secondResolve, reject: vi.fn() })
+    const firstMessage = {
+      id: 'batch-result-1',
+      role: 'tool' as const,
+      toolCallId: 'batch-call-1',
+      content: 'first',
+      metadata: { valid: true },
+    }
+    const invalid = binding.reserveRun(input('batch-invalid', [firstMessage, {
+      id: 'batch-result-2',
+      role: 'tool',
+      toolCallId: 'batch-call-2',
+      content: 'second',
+      metadata: { invalid: undefined },
+    }]), 'batch-invalid-digest')
+
+    binding.drive(invalid)
+    await invalid.done
+
+    expect(invalid.record.events.at(-1)).toMatchObject({ code: 'INVALID_TOOL_RESULT_METADATA' })
+    expect(firstResolve).not.toHaveBeenCalled()
+    expect(secondResolve).not.toHaveBeenCalled()
+
+    const corrected = binding.reserveRun(input('batch-corrected', [firstMessage, {
+      id: 'batch-result-2',
+      role: 'tool',
+      toolCallId: 'batch-call-2',
+      content: 'second',
+      metadata: { valid: true },
+    }]), 'batch-corrected-digest')
+    binding.drive(corrected)
+    await corrected.done
+
+    expect(corrected.record.events.at(-1)).toMatchObject({ type: EventType.RUN_FINISHED })
+    expect(firstResolve).toHaveBeenCalledWith({ content: 'first', presentationMeta: { valid: true } })
+    expect(secondResolve).toHaveBeenCalledWith({ content: 'second', presentationMeta: { valid: true } })
   })
 
   it('reports a full ledger when its oldest entry is active', async () => {
@@ -334,6 +524,101 @@ describe('ThreadBinding frontend Tools', () => {
     expect(result.record.events.at(-1)?.type).toBe(EventType.RUN_FINISHED)
   })
 
+  it('persists configured opaque metadata only on its admitted render result', async () => {
+    const render = { ...TOOL, name: 'render_a2ui' }
+    const { binding } = await mount([scriptedToolResponse('configured-render', render.name, { value: 'x' }), textResponse('done')])
+    const metadata = { owner: { catalog: 'resolved', foreign: ['opaque'] } }
+    const request = { ...input('configured-meta', [{ id: 'configured-user', role: 'user', content: 'render' }], [render]), forwardedProps: { injectA2UITool: true, toolResultMetadata: { render_a2ui: metadata } } }
+    const run = binding.reserveRun(request, 'configured-meta-digest')
+    binding.drive(run)
+    await run.done
+    expect(run.record.events.find(event => event.type === EventType.TOOL_CALL_RESULT)).toMatchObject({ metadata })
+    const snapshot = run.record.events.at(-2)
+    expect(snapshot).toMatchObject({ type: EventType.MESSAGES_SNAPSHOT, messages: expect.arrayContaining([expect.objectContaining({ role: 'tool', toolCallId: 'configured-render', metadata })]) })
+    expect(binding.liveAgent.session.snapshotEvents().find(event => event.type === 'tool/result')).toMatchObject({ data: { meta: metadata } })
+  })
+
+  it('accepts a run with non-object forwarded properties without configured metadata', async () => {
+    const { binding } = await mount()
+    const request = { ...input('no-props', [{ id: 'no-props-user', role: 'user', content: 'hi' }]), forwardedProps: null }
+    const run = binding.reserveRun(request, 'no-props-digest')
+    binding.drive(run)
+    await run.done
+    expect(run.record.events.at(-1)).toMatchObject({ type: EventType.RUN_FINISHED })
+  })
+
+  it.each([null, [], 5, { render_a2ui: { invalid: undefined } }])('rejects invalid configured metadata before executing a model: %j', async metadata => {
+    const { binding, adapter } = await mount([])
+    const request = { ...input('bad-meta', [{ id: 'bad-meta-user', role: 'user', content: 'hi' }]), forwardedProps: { toolResultMetadata: metadata } }
+    const run = binding.reserveRun(request, 'bad-meta-digest')
+    binding.drive(run)
+    await run.done
+    expect(run.record.events.at(-1)).toMatchObject({ type: EventType.RUN_ERROR, code: 'INVALID_TOOL_RESULT_METADATA' })
+    expect(adapter.requests).toHaveLength(0)
+  })
+
+  it('persists frontend Tool metadata without changing its model-facing content', async () => {
+    const { adapter, binding } = await mount([
+      toolResponse('call-metadata', { value: 'x' }),
+      textResponse('handled metadata'),
+    ])
+    const first = binding.reserveRun(input(
+      'run-metadata-1',
+      [{ id: 'message-metadata', role: 'user', content: 'call it' }],
+      [TOOL],
+    ), 'digest-metadata-1')
+    binding.drive(first)
+    await first.done
+    const metadata = { a2ui: { ownerToolCallId: 'presentation-owner' } }
+    const result = binding.reserveRun(input('run-metadata-2', [{
+      id: 'result-metadata',
+      role: 'tool',
+      toolCallId: 'call-metadata',
+      content: 'browser-rendered',
+      metadata,
+    }], [TOOL]), 'digest-metadata-2')
+
+    binding.drive(result)
+    await result.done
+    await binding.liveAgent.whenIdle()
+
+    const durable = binding.liveAgent.session.snapshotEvents().find(event => event.type === 'tool/result'
+      && String(event.data.message.content[0].toolCallId) === 'call-metadata')
+    expect(durable).toMatchObject({ data: { meta: metadata } })
+    expect(durable?.data.message.content[0].content).toEqual([{ type: 'text', text: 'browser-rendered' }])
+    expect(adapter.requests[1]?.messages.some(message => message.content.some(block =>
+      block.type === 'tool-result'
+      && String(block.toolCallId) === 'call-metadata'
+      && block.content.some(content => content.type === 'text' && content.text === 'browser-rendered')))).toBe(true)
+  })
+
+  it('rejects non-lossless frontend Tool metadata before settling the pending call', async () => {
+    const { binding } = await mount([toolResponse('call-invalid-metadata', { value: 'x' })])
+    const first = binding.reserveRun(input(
+      'run-invalid-metadata-1',
+      [{ id: 'message-invalid-metadata', role: 'user', content: 'call it' }],
+      [TOOL],
+    ), 'digest-invalid-metadata-1')
+    binding.drive(first)
+    await first.done
+    const result = binding.reserveRun(input('run-invalid-metadata-2', [{
+      id: 'result-invalid-metadata',
+      role: 'tool',
+      toolCallId: 'call-invalid-metadata',
+      content: 'browser-rendered',
+      metadata: { invalid: undefined },
+    }], [TOOL]), 'digest-invalid-metadata-2')
+
+    binding.drive(result)
+    await result.done
+
+    expect(result.record.events.at(-1)).toMatchObject({
+      type: EventType.RUN_ERROR,
+      code: 'INVALID_TOOL_RESULT_METADATA',
+    })
+    expect(binding.liveAgent.session.snapshotEvents().some(event => event.type === 'tool/result')).toBe(false)
+  })
+
   it('times out a pending frontend Tool without sleeping', async () => {
     const { binding } = await mount([toolResponse('call-timeout', { value: 'x' })], { frontendToolTimeoutMs: 60_000 })
     const controller = binding.reserveRun(input('run-1', [{ id: 'message-1', role: 'user', content: 'call it' }], [TOOL]), 'digest')
@@ -358,7 +643,8 @@ describe('ThreadBinding frontend Tools', () => {
     const replacement = binding.liveAgent.ctx.tools.get(TOOL.name, binding.liveAgent)
     expect(replacement).not.toBe(first)
     expect(replacement?.presentCall?.({ value: 'x' })).toEqual({ card: 'generic', title: changed.description, rawInput: { value: 'x' } })
-    expect(replacement?.output.render({}, 7)).toEqual([{ type: 'text', text: '7' }])
+    expect(replacement?.output.render({}, { content: '7' })).toEqual([{ type: 'text', text: '7' }])
+    expect(replacement?.output.presentationMeta?.({}, { content: '7' })).toBeNull()
     state.applyFrontendTools([])
     expect(binding.liveAgent.ctx.tools.get(TOOL.name, binding.liveAgent)).toBeUndefined()
   })
@@ -534,7 +820,10 @@ describe('ThreadBinding shared state', () => {
     }
     const opening = { type: EventType.RUN_STARTED, threadId: 'thread-1', runId: 'state-update-bytes' }
     const baseline = { type: EventType.STATE_SNAPSHOT, snapshot: { value: 1 } }
-    const messagesSnapshot = { type: EventType.MESSAGES_SNAPSHOT, messages: [] }
+    const messagesSnapshot = {
+      type: EventType.MESSAGES_SNAPSHOT,
+      messages: [{ id: 'state-update-message-bytes', role: 'user', content: 'update state' }],
+    }
     const byteLimit = [opening, messagesSnapshot, baseline].reduce((total, event) => total + Buffer.byteLength(JSON.stringify(event)), 0)
       + Math.max(Buffer.byteLength(JSON.stringify(success)), Buffer.byteLength(JSON.stringify(overflowError)))
 
@@ -737,12 +1026,94 @@ describe('ThreadBinding defensive Tool execution', () => {
     const abort = new AbortController()
     const parked = state.parkFrontendTool(TOOL.name, TOOL.parameters, { value: 'x' }, { callId: ToolCallId('abort-call'), signal: abort.signal } as ToolRunContext)
     abort.abort()
-    state.pendingCalls.get('abort-call')?.resolve('late')
+    state.pendingCalls.get('abort-call')?.resolve({ content: 'late' })
     await expect(parked).rejects.toThrow('aborted')
   })
 })
 
+describe('ThreadBinding overflow containment', () => {
+  it('cancels the exact native turn before a later backend side effect can run', async () => {
+    const fixture = await mount([scriptedToolResponse('danger', 'side_effect', {}), textResponse('must not run')], { maxRunEvents: 4 })
+    let effects = 0
+    const unregister = fixture.ctx.tools.register({ ...globalTool('side_effect'), execute: () => { effects++; return Promise.resolve('applied') } })
+    const cancel = vi.spyOn(fixture.binding.liveAgent, 'cancel')
+    const controller = fixture.binding.reserveRun(input('overflow-effect', [{ id: 'overflow-user', role: 'user', content: 'execute' }]), 'overflow-effect-digest')
+    fixture.binding.drive(controller)
+    await controller.done
+    await fixture.binding.liveAgent.whenIdle()
+    expect(controller.record.events.at(-1)).toMatchObject({ type: EventType.RUN_ERROR, code: 'AG_UI_EVENT_BUFFER_OVERFLOW' })
+    expect(cancel).toHaveBeenCalledOnce()
+    expect(effects).toBe(0)
+    expect(fixture.adapter.requests).toHaveLength(1)
+    unregister()
+  })
+
+  it.each([false, true])('cancels an admission failure exactly once, converted to overflow=%s', async converted => {
+    const { binding } = await mount([toolResponse('pending-admission', { value: 'x' })])
+    const first = binding.reserveRun(input('admission-first', [{ id: 'admission-user', role: 'user', content: 'call' }], [TOOL]), 'admission-first-digest')
+    binding.drive(first)
+    await first.done
+    const cancel = vi.spyOn(binding.liveAgent, 'cancel')
+    const controller = binding.reserveRun(input('admission-failure', [{ id: 'admission-result', role: 'tool', toolCallId: 'pending-admission', content: 'ok' }], [TOOL]), 'admission-failure-digest')
+    controller.turn = first.turn
+    controller.start()
+    internals(binding).failRunAdmission(controller, new AgUiGatewayError('ADMISSION_FAILED', converted ? 'x'.repeat(OPTIONS.maxRunEventBytes) : 'invalid continuation'))
+    await controller.done
+    await binding.liveAgent.whenIdle()
+    expect(controller.record.events.at(-1)).toMatchObject({ type: EventType.RUN_ERROR, code: converted ? 'AG_UI_EVENT_BUFFER_OVERFLOW' : 'ADMISSION_FAILED' })
+    expect(cancel).toHaveBeenCalledOnce()
+  })
+
+  it('does not cancel an active turn for a concurrent read overflow or a stale controller', async () => {
+    const { binding, adapter } = await mount([toolResponse('pending-overflow', { value: 'x' }), textResponse('continued')])
+    const first = binding.reserveRun(input('overflow-first', [{ id: 'overflow-first-user', role: 'user', content: 'call' }], [TOOL]), 'overflow-first-digest')
+    binding.drive(first)
+    await first.done
+    const cancel = vi.spyOn(binding.liveAgent, 'cancel')
+    const active = binding.reserveRun(input('overflow-next', [{ id: 'overflow-result', role: 'tool', toolCallId: 'pending-overflow', content: 'ok' }], [TOOL]), 'overflow-next-digest')
+    active.turn = first.turn
+    const read = await binding.admit(input('overflow-read', []), 'overflow-read-digest', new AbortController().signal)
+    read.start()
+    read.emit({ type: EventType.MESSAGES_SNAPSHOT, messages: [{ id: 'huge', role: 'assistant', content: 'x'.repeat(OPTIONS.maxRunEventBytes) }] })
+    first.error('AG_UI_EVENT_BUFFER_OVERFLOW', 'late overflow')
+    internals(binding).failRunAdmission(first, new AgUiGatewayError('STALE_ADMISSION', 'late admission failure'))
+    expect(read.record.events.at(-1)).toMatchObject({ code: 'AG_UI_EVENT_BUFFER_OVERFLOW' })
+    expect(cancel).not.toHaveBeenCalled()
+    binding.drive(active)
+    await active.done
+    await binding.liveAgent.whenIdle()
+    expect(adapter.requests).toHaveLength(2)
+    expect(cancel).not.toHaveBeenCalled()
+  })
+})
+
 describe('ThreadBinding session projection', () => {
+  it('reads native append-origin transcript after a valid model-surface replacement', async () => {
+    const { binding, ctx, adapter } = await mount([])
+    const unregister = ctx.tools.register(globalTool('durable_view'))
+    const session = binding.liveAgent.session
+    session.append('turn/start', { turn: 1 })
+    session.append('step/start', { turn: 1, step: 1 })
+    session.append('assistant/message', { turn: 1, step: 1, message: createAssistantMessage({
+      content: [{ type: 'text', text: 'Visible original' }, { type: 'tool-call', id: ToolCallId('kept'), name: 'durable_view', arguments: '{}' }], source: { provider: 'scripted', model: 'scripted' },
+    }) }, { surfaceOp: 'append' })
+    session.append('tool/call', { turn: 1, step: 1, callId: ToolCallId('kept'), name: 'durable_view', arguments: '{}' })
+    const result = session.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: ToolCallId('kept'), isError: false, content: [{ type: 'text', text: 'Visible result' }] }) }, { surfaceOp: 'append' })
+    session.append('step/end', { turn: 1, step: 1 })
+    session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    session.append('tool/result', { ...result.data, message: { ...result.data.message, content: [{ ...result.data.message.content[0], content: [{ type: 'text', text: 'Model-only summary' }] }] } }, { surfaceOp: { op: 'replace', startSeq: result.seq, endSeq: result.seq }, sourceEventSeqs: [result.seq] })
+    expect(session.deriveMessages()).toHaveLength(2)
+    const read = binding.reserveRun(input('read-replaced', []), 'read-replaced-digest')
+    binding.drive(read)
+    await read.done
+    const snapshot = read.record.events.find(event => event.type === EventType.MESSAGES_SNAPSHOT)
+    expect(snapshot).toMatchObject({ messages: [{ role: 'assistant', content: 'Visible original' }, { role: 'tool', content: 'Visible result' }] })
+    expect(JSON.stringify(read.record.events)).not.toContain('Model-only summary')
+    expect(read.record.events.filter(event => event.type === EventType.CUSTOM && event.name === 'dsh:tool:view')).toHaveLength(1)
+    expect(adapter.requests).toHaveLength(0)
+    unregister()
+  })
+
   it('projects assembled text when the provider emitted no text delta', async () => {
     const message = createAssistantMessage({
       content: [{ type: 'text', text: 'assembled only' }],
@@ -767,6 +1138,7 @@ describe('ThreadBinding session projection', () => {
       EventType.TEXT_MESSAGE_START,
       EventType.TEXT_MESSAGE_CONTENT,
       EventType.TEXT_MESSAGE_END,
+      EventType.MESSAGES_SNAPSHOT,
       EventType.RUN_FINISHED,
     ])
   })
@@ -800,6 +1172,36 @@ describe('ThreadBinding session projection', () => {
     binding.liveAgent.session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
     await controller.done
     expect(controller.record.events.filter(event => event.type === EventType.TEXT_MESSAGE_CONTENT)).toHaveLength(2)
+  })
+
+  it('replaces an abandoned retry prefix with durable text before finishing', async () => {
+    const { binding } = await mount([])
+    const controller = binding.reserveRun(input('retry-prefix', [{ id: 'retry-user', role: 'user', content: 'hello' }]), 'retry-digest')
+    controller.turn = 1
+    controller.start()
+    const agent = binding.liveAgent
+    agent.session.append('turn/start', { turn: 1 })
+    agent.session.append('step/start', { turn: 1, step: 1 })
+    for (const [attempt, text] of ['abandoned prefix ', 'committed answer'].entries()) {
+      const attemptId = LlmAttemptId(`retry-${attempt}`)
+      agent.ctx.emit('agent/assistant-stream', { agent, frame: {
+        type: 'start', attemptId, revision: 0, turn: 1, step: 1,
+      } })
+      agent.ctx.emit('agent/assistant-stream', { agent, frame: {
+        type: 'chunk', attemptId, revision: 0, index: 0, time: 0,
+        chunk: { type: 'text-delta', index: 0, text },
+      } })
+    }
+    agent.session.append('assistant/message', { turn: 1, step: 1, message: createAssistantMessage({
+      content: [{ type: 'text', text: 'committed answer' }],
+      source: { provider: 'scripted', model: 'scripted' },
+    }) }, { surfaceOp: 'append' })
+    agent.session.append('step/end', { turn: 1, step: 1 })
+    agent.session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    await controller.done
+    expect(controller.record.events.filter(event => event.type === EventType.TEXT_MESSAGE_CONTENT).map(event => event.delta).join('')).toBe('abandoned prefix committed answer')
+    expect(controller.record.events.at(-2)).toMatchObject({ type: EventType.MESSAGES_SNAPSHOT, messages: [{ role: 'assistant', content: 'committed answer' }] })
+    expect(controller.record.events.at(-1)).toMatchObject({ type: EventType.RUN_FINISHED })
   })
 
   it('renders every backend Tool result content kind', async () => {
@@ -868,7 +1270,7 @@ describe('ThreadBinding session projection', () => {
     await controller.done
     expect(controller.record.events.at(-1)).toMatchObject({ code: 'AGENT_EXECUTION_ERROR', message: 'agent failed' })
     state.onAgentError(new Error('ignored'))
-    expect(controller.record.events).toHaveLength(2)
+    expect(controller.record.events).toHaveLength(3)
   })
 
   it('projects an unsupported extended turn reason defensively', async () => {

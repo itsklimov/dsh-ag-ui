@@ -15,8 +15,9 @@
 - 通过 `ctx.agUi` 暴露的标准 Cordis `Service` 插件
 - 通过 `ctx.browserTools` 暴露的传输无关 Agent-scoped browser Tool broker
 - 可使用 `dsh plugin add` 安装的 DSH Profile Bundle
-- 下限式 AG-UI 协议范围（`~0.0.58`）
+- 下限式 AG-UI 协议范围（`~0.0.59`）
 - 使用可信 tenant/user headers 的 BFF-to-Gateway 认证
+- 按 thread 流式上传文件并通过认证 route 下载
 - `(tenantId, userId, threadId)` 到 DSH Agent 的进程内绑定
 - AG-UI 文本流与 backend Tool result 投影
 - 由 `RunAgentInput.tools` 提供的 Agent-scoped browser Tools
@@ -103,9 +104,10 @@ lease.dispose()
 
 | 字段 | 默认值 | 用途 |
 | --- | --- | --- |
-| `path` | `/ag-ui` | 精确 Host HTTP route |
+| `path` | `/ag-ui` | Run 与 file 使用的 Host HTTP route base |
 | `provider` | 必填 | 已注册 DSH model provider route |
 | `model` | 必填 | Provider 持有的 model ID |
+| `workspaceRoot` | `<DSH_HOME>/workspaces` | 按 durable session id 命名的 thread workspace 目录根路径 |
 | `agentPreset` | 无 | 组合进每个线程的部署级默认 agent preset id |
 | `tenantPresets` | `{}` | 按租户覆盖 `agentPreset` 的 preset id 映射 |
 | `sharedSecret` | 必填 | 仅与可信 BFF 共享的 bearer secret |
@@ -113,9 +115,11 @@ lease.dispose()
 | `userHeader` | `x-dsh-user-id` | 可信 user identity header |
 | `allowNonLoopback` | `false` | 显式允许非 loopback Host bind |
 | `maxRequestBytes` | `262144` | 最大 request body bytes |
+| `maxFileBytes` | `104857600` | 每个上传文件的最大 bytes |
 | `maxIdentityBytes` | `256` | 每个 protocol 或 identity ID 的最大 bytes |
 | `maxMessages` | `256` | 每次 request 的最大 message 数量 |
 | `maxMessageBytes` | `524288` | Message JSON 最大总 bytes |
+| `maxFilesPerMessage` | `8` | 每条 user message 的最大非文本 part 数量 |
 | `maxContexts` | `32` | 最大 context entry 数量 |
 | `maxContextBytes` | `131072` | Context JSON 最大总 bytes |
 | `maxTools` | `32` | 最大 browser Tool 数量 |
@@ -132,7 +136,15 @@ lease.dispose()
 
 `agentPreset` 让每个线程的 agent 从宿主的 agent-presets roster 组合而来（需在本 Gateway 之前挂载 roster 插件）；无法解析的 id 会让 Gateway 激活响亮失败，按租户条目覆盖该租户线程的部署默认值，而恢复的线程保持其持久 session 自己记录的组合。不配置 `agentPreset` 时，线程保持宿主组合不变。
 
+每个新 thread 使用 `<workspaceRoot>/<sessionId>` 作为 DSH session working directory，并创建 `uploads` 子目录。目录按 durable session id 命名，客户端 thread id 不会落盘。Gateway 激活时会展开相对路径和 `~` 路径。Host 提供 `workspaceRegistry` 时，新 workspace 也会注册到 DSH Web。
+
+可信 BFF 可以在 run 前把文件流式写入该目录。`POST <path>/threads/<threadId>/files` 接收 raw body、`content-length`、可选的 `content-type`，以及 `x-file-name` 中 percent-encoded UTF-8 文件名。`GET <path>/threads/<threadId>/files/<name>` 从已有的认证 thread binding 下载文件。两个 route 与 run route 使用相同的 bearer secret 和 identity headers。
+
+User message 支持有序的 AG-UI content parts。Text part 保持为文本。URL part 必须引用当前 thread `uploads` 目录中的 `<prefix>/threads/<threadId>/files/<encodeURIComponent(name)>`。Host 提供 attachment storage 时，图片会成为原生 DSH image block；其他上传文件会成为 `Attached file: uploads/<name> (...)` 文本，Agent 可从 workspace 打开它们。不接受 inline data part；请先把文件上传到 thread，再通过 URL 引用。`MESSAGES_SNAPSHOT` 返回的 user message 与客户端发送的 parts 完全一致，因此回传 snapshot 的客户端保持相同的 message digest。
+
 `maxRunEvents` 必须至少容纳 mandatory opening 与 terminal events。`maxRunEventBytes` 会限制包含 `RUN_STARTED` 和 terminal event 在内的完整 retained Run record，并且必须足以容纳已配置的最大 identity length。非 loopback DSH WebServer 需要设置 `allowNonLoopback: true`。推荐把 Gateway 保持在 loopback，并放在同 Host 的 authenticated BFF 后面。
+
+开始和结束时的持久化历史快照都会计入该上限。事件缓冲区溢出会结束 HTTP run，并且只取消该 run 当前已领取的原生 turn。只读历史请求溢出不会取消其他活跃 turn。已完成的重复请求仍精确重放所保留的 events。
 
 ## 架构
 
@@ -209,20 +221,23 @@ BFF 持有 login、session、CSRF、tenant policy、resource authorization、aud
 
 AG-UI gateway 只是众多带 HTTP remote 的 Host-plane service 之一；其他 DSH 服务插件也可以在同一个环回 webserver 上挂载路由。同一条规则覆盖所有这些 remote：浏览器永远不直接访问 Host。每个 remote 都经应用 backend 暴露在应用自己的路由之下，采用上文"认证 → 授权 → 转发"的形态并附带该服务期望的凭据。Host 端口本身保持 loopback，也不向客户端公开。
 
-## 浏览器客户端
+## AG-UI 客户端
 
-在 frontend application 中安装官方 client。支持协议范围（`>=0.0.58 <0.1.0`）内的任意版本均可；网关不要求 client 精确锁版：
+Gateway wire protocol 接受支持范围（`>=0.0.58 <0.1.0`）内的官方 client，并不要求精确锁版。Gateway 自带的 `DshHttpAgent` companion 已针对 `@ag-ui/client ~0.0.59` 测试并声明 peer：
 
 ```bash
-pnpm add @ag-ui/client
+pnpm add dsh-ag-ui @ag-ui/client@~0.0.59
 ```
+
+使用 gateway 自己提供的 client companion，避免长对话反复发送已完成的 transcript。Agent 仍保留完整本地 history，供渲染器与 middleware 使用；只有 HTTP input 会缩减为最后一个 assistant boundary 之后的 user 与 Tool messages。官方 A2UI action run 还会原样保留 middleware 追加的最后一对 synthetic messages。
 
 在每个 run 中发送页面相关的 browser Tools 与当前 context：
 
 ```ts
-import { HttpAgent, randomUUID } from '@ag-ui/client'
+import { randomUUID } from '@ag-ui/client'
+import { DshHttpAgent } from 'dsh-ag-ui/client'
 
-const agent = new HttpAgent({
+const agent = new DshHttpAgent({
   url: '/api/agent',
   threadId: 'application-thread-123',
 })
@@ -244,7 +259,11 @@ await agent.runAgent({
 })
 ```
 
+该 stateless 选择会保留 admission 前被拒绝的 messages。如果一连串 run 已被 Gateway 接受、却都在产生 assistant message 前失败，client 就没有 assistant boundary 可用，这些已确认的 user messages 仍可能留在 outgoing tail 中。Gateway 会继续按 ID 去重；若要让这个少见的 failure path 也严格 bounded，需要新增显式 acknowledgement cursor。
+
 模型调用 browser-owned Tool 时，当前 HTTP run 成功结束，但 DSH Tool Promise 仍然 pending。浏览器执行 Tool、追加一条使用相同 `toolCallId` 的标准 AG-UI ToolMessage，再开始另一个 run。Gateway resolve 原始 Promise，并继续同一个 DSH turn。
+
+官方 `@ag-ui/a2ui-middleware` 使用同一套原生 contract。middleware 直接根据流式 Tool 参数渲染，从不发送浏览器 result，因此 Gateway 不会 park 它在 `forwardedProps.injectA2UITool` 中标记的 render Tool：该调用立即以 `{"status":"rendered"}` 结算，result 在同一个 run 内流出，DSH turn 继续执行。客户端自行注册的 render Tool 仍像其他浏览器 Tool 一样 park。之后的 `forwardedProps.a2uiAction` 会作为 durable plugin context 开启下一个 turn。该 context 同时保留可读的 middleware result 与完整、已校验的 action JSON（包括可选 timestamp），并递归排序对象键。Gateway 只接受 middleware 的精确有界 action envelope，以及末尾匹配的 `log_a2ui_event` assistant/Tool pair；它不会把任意 assistant history 导入 DSH。
 
 普通 browser Tool result 不要通过 AG-UI `resume[]` 发送；该字段保留给显式 interrupt/HITL flow。
 
@@ -303,12 +322,15 @@ Upstream Dojo 的 integration registry 是静态源码，目前没有 `deepseek-
 ## HTTP 与 run 语义
 
 - Request 必须为 `POST application/json`，并且符合 AG-UI `RunAgentInput`。
-- 普通 run 接受一条新的 text user message。
+- 普通 run 接受一条或多条包含 text 或受支持 multimodal content parts 的新 user message，它们按到达顺序进入同一个 DSH turn。没有新消息的 run 只返回历史 snapshot。
 - Continuation 接受属于一个 pending DSH turn 的一条或多条新 frontend ToolMessages。
+- 官方 A2UI user-action run 接受经过校验的 `a2uiAction` envelope 与匹配的 synthetic `log_a2ui_event` pair；它也可以同时携带客户端自有 pending `render_a2ui` 调用的 result。
+- middleware 在 `forwardedProps.injectA2UITool` 中标记的 render Tool 会在其 run 内以 `{"status":"rendered"}` 结算，从不 park。
+- 已认证 pending frontend Tool result 上的标准对象 metadata 会通过原生 DSH presentation metadata 持久化，并由后续 message snapshot 返回；没有 metadata 的结果在 wire 上保持不变。
 - 一个 DSH turn 可以跨多个 AG-UI HTTP runs。
 - 每个 run 发出一个 `RUN_STARTED` 和恰好一个 `RUN_FINISHED` 或 `RUN_ERROR`。
 - `runId` 是 exact-request idempotency key。已完成的相同 request 会重放 retained events，不再次驱动 DSH。
-- 一个 thread 同时只能有一个 active HTTP run。
+- 一个 thread 同时只驱动一个 HTTP run。在另一个 run 活跃时到达的 run 会等待它以及 Agent turn 结束，因此同一 thread 的 runs 按到达顺序执行；等待中断开连接的客户端不会被接纳。
 - Active shared-state run 会在 model events 前发送 synchronization snapshot。
 - 一个 DSH step 可挂起多个 frontend Tool call；续跑可只回答其中一部分。
 
@@ -356,7 +378,8 @@ Backend Tool result 会发出 `TOOL_CALL_RESULT`。Frontend Tool result 不在 A
 
 | 组件 | 支持版本 |
 | --- | --- |
-| AG-UI core/client/encoder | `>=0.0.58 <0.1.0`（`~0.0.58`；已用 `0.0.58` 验证） |
+| AG-UI core/client/encoder | `>=0.0.58 <0.1.0`（`~0.0.59`；已用 `0.0.59` 验证） |
+| `dsh-ag-ui/client` companion | `@ag-ui/client ~0.0.59` |
 | Node.js | `^22.19.0` 或 `>=24.0.0` |
 | DeepSeek Harness | `0.1.5-alpha.1`（精确的 developer-preview peers） |
 

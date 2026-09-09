@@ -1,6 +1,9 @@
 import type { Context } from '@deepseek-ai/cordis'
+import { mkdir, realpath } from 'node:fs/promises'
+import { join } from 'node:path'
 import {
   EventType,
+  type InputContent,
   type Message as AgUiMessage,
   type RunAgentInput,
   type Tool as AgUiTool,
@@ -8,7 +11,14 @@ import {
   type UserMessage as AgUiUserMessage,
 } from '@ag-ui/core'
 import type { Agent, AgentHandle, AgentSetup } from '@deepseek-ai/dsh-agent'
-import { createUserMessage, errorChain, freezeMessage, MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
+import type {
+  AdmittedPromptContentPart,
+  AttachmentStore,
+  ImageMediaType,
+  AttachmentAdmissionPart,
+  FileAttachmentRef,
+} from '@deepseek-ai/dsh-attachment'
+import { createUserMessage, errorChain, freezeMessage, MessageId, ToolCallId, type UserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { SessionPersistenceNotFoundError } from '@deepseek-ai/dsh-session-persistence'
 import {
@@ -18,7 +28,10 @@ import {
   type ToolDefinition,
   type ToolRunContext,
 } from '@deepseek-ai/dsh-tools'
+import { isJsonValue, type JsonValue } from '@deepseek-ai/dsh-util-values'
 import { isDeepStrictEqual } from 'node:util'
+import type { FileUploads, FileUploadReceiptId, FileUploadValue } from '@deepseek-ai/dsh-client-file-upload'
+import { signedFileUrl, verifiedFileUrl } from './files.ts'
 import { AgUiGatewayError } from './errors.ts'
 import { jsonBytes, valueDigest } from './json.ts'
 import { durableUserId, SessionProjection, STATE_TOOL_NAME } from './projection.ts'
@@ -27,7 +40,18 @@ import { RunController, type RunRecord } from './run.ts'
 import type { ToolPresenter } from './tool-view.ts'
 import type { AgUiPrincipal, AgUiThreadIdentity } from './types.ts'
 
+/** Roles a run may admit: user messages open a turn, Tool results continue one. Every other run only reads history. */
+const ADMITTED_ROLES: ReadonlySet<AgUiMessage['role']> = new Set(['user', 'tool'])
+const hasNewMessages = (messages: RunAgentInput['messages']): boolean => messages.some(message => ADMITTED_ROLES.has(message.role))
+
+/** Synthetic context Tool used by the official A2UI middleware for user actions. */
+const A2UI_ACTION_TOOL_NAME = 'log_a2ui_event'
+/** Default name of the render Tool the official A2UI middleware injects into a run. */
+const A2UI_RENDER_TOOL_NAME = 'render_a2ui'
+/** The result the middleware would synthesize for a render call; the Gateway returns it inside the run instead. */
+const A2UI_RENDERED_RESULT = JSON.stringify({ status: 'rendered' })
 const FRONTEND_TOOL_NAME = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/
+const IMAGE_MEDIA_TYPES = new Set<string>(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
 
 /** Fixed identity for registry scheduling probes that never dispatch. */
 const SCHEDULING_PROBE = {
@@ -40,6 +64,8 @@ const SCHEDULING_PROBE = {
 export interface ThreadOptions {
   readonly provider: string
   readonly model: string
+  /** Absolute root containing the deterministic thread workspace. */
+  readonly workspaceRoot: string
   /** Preset id composed into the thread's agents; absent keeps the host composition. */
   readonly presetId?: string
   readonly frontendToolTimeoutMs: number
@@ -48,10 +74,26 @@ export interface ThreadOptions {
   readonly maxRunEventBytes: number
   readonly maxRunsPerThread: number
   readonly maxStateBytes: number
+  readonly maxFilesPerMessage: number
+  readonly fileSecret?: string
 }
 
 interface AcceptedMessage {
   readonly role: 'user' | 'tool'
+  readonly digest: string
+}
+
+interface A2UIUserAction {
+  readonly name?: string
+  readonly surfaceId?: string
+  readonly sourceComponentId?: string
+  readonly context?: Record<string, unknown>
+  readonly timestamp?: string
+}
+
+interface A2UIActionContinuation {
+  readonly action: A2UIUserAction
+  readonly result: AgUiToolMessage
   readonly digest: string
 }
 
@@ -62,8 +104,13 @@ interface FrontendToolRegistration {
 
 interface PendingFrontendCall {
   readonly turn: number
-  resolve(value: string): void
+  resolve(value: FrontendToolResultValue): void
   reject(error: Error): void
+}
+
+interface FrontendToolResultValue {
+  readonly content: string
+  readonly presentationMeta?: JsonValue
 }
 
 interface PreparedFrontendTool {
@@ -77,12 +124,22 @@ interface SharedStateBaseline {
   readonly value: unknown
 }
 
+/** Canonical paths owned by one thread binding. */
+export interface ThreadWorkspace {
+  readonly cwd: string
+}
+
+interface WorkspaceRegistryLike {
+  create(path: string, title?: string): Promise<unknown>
+}
+
 /** One authenticated process-local AG-UI thread and its owned DSH Agent. */
 export class ThreadBinding {
   /** Deterministic durable DSH session identity, derived from the authenticated thread tuple. */
   readonly sessionId: SessionId
   /** Authenticated principal and client thread tuple owning this binding. */
   readonly identity: AgUiThreadIdentity
+  private workspaceValue: ThreadWorkspace | undefined
   /** Pure session-event to wire-event translation owned by this thread. */
   private readonly projection: SessionProjection
   /** Presenter seam: definitions resolve in the owning Agent's scope; client Tools present themselves. */
@@ -100,9 +157,13 @@ export class ThreadBinding {
   private interrupted = false
   private activeRun: RunController | undefined
   private idleTimer: ReturnType<typeof setTimeout> | undefined
+  private activeFileOperations = 0
   private readonly acceptedMessages = new Map<string, AcceptedMessage>()
   private readonly frontendTools = new Map<string, FrontendToolRegistration>()
   private stagedTools: AgUiTool[] | undefined
+  /** Render Tool the A2UI middleware flagged for the current run; its calls settle without a browser result. */
+  private a2uiRenderTool: string | undefined
+  private toolResultMetadata: Readonly<Record<string, JsonValue>> = {}
   private readonly pendingCalls = new Map<string, PendingFrontendCall>()
   private readonly runLedger = new Map<string, RunRecord>()
   private readonly userMessageIds = new Map<string, string>()
@@ -132,19 +193,62 @@ export class ThreadBinding {
 
   private async restoreOrCreate(): Promise<AgentHandle> {
     const agentOptions = { provider: this.options.provider, model: this.options.model }
-    // the resolved preset is snapshotted into durable meta at creation, before any await
-    const meta = this.options.presetId === undefined ? {} : { meta: { agentPreset: this.options.presetId } }
-    const create = () => this.ctx.agents.create({ sessionId: this.sessionId, ...meta, agentOptions, setup: this.agentSetup() })
+    const create = () => this.create(agentOptions)
     if (this.ctx.get('sessionPersistence') === undefined) return create()
     try {
       const handle = await this.ctx.agents.resume({ resumeSessionId: this.sessionId, agentOptions, setup: this.agentSetup() })
-      this.recover(handle.agent.session.snapshotEvents())
-      return handle
+      try {
+        const recordedCwd = handle.agent.session.header.cwd
+        if (recordedCwd === undefined) {
+          this.ctx.logger.warn(`ag-ui: resumed legacy session ${String(this.sessionId)} without a workspace cwd`)
+        } else {
+          const workspace = await this.prepareWorkspace()
+          if (recordedCwd !== workspace.cwd) {
+            throw new AgUiGatewayError(
+              'SESSION_CWD_MISMATCH',
+              'The persisted session workspace does not match the configured thread workspace.',
+              409,
+            )
+          }
+          this.workspaceValue = workspace
+        }
+        this.recover(handle.agent.session.snapshotEvents())
+        return handle
+      } catch (error) {
+        await handle.dispose()
+        throw error
+      }
     } catch (error) {
       // A missing log permits creation; corruption, format refusal, and setup failures do not.
       if (!(error instanceof SessionPersistenceNotFoundError)) throw error
       return create()
     }
+  }
+
+  private async create(agentOptions: { provider: string; model: string }): Promise<AgentHandle> {
+    const workspace = await this.prepareWorkspace()
+    const registry = workspaceRegistryOf(this.ctx)
+    if (registry !== undefined) await registry.create(workspace.cwd, String(this.sessionId))
+    const meta = {
+      cwd: workspace.cwd,
+      ...(this.options.presetId === undefined ? {} : { agentPreset: this.options.presetId }),
+    }
+    const handle = await this.ctx.agents.create({
+      sessionId: this.sessionId,
+      meta,
+      agentOptions,
+      setup: this.agentSetup(),
+    })
+    this.workspaceValue = workspace
+    return handle
+  }
+
+  private async prepareWorkspace(): Promise<ThreadWorkspace> {
+    // named by the durable session id so the client thread id stays off disk
+    const directory = join(this.options.workspaceRoot, String(this.sessionId))
+    await mkdir(directory, { recursive: true })
+    const cwd = await realpath(directory)
+    return { cwd }
   }
 
   private agentSetup(): AgentSetup {
@@ -204,6 +308,11 @@ export class ThreadBinding {
     return this.agent
   }
 
+  /** Canonical workspace paths, or undefined when a legacy session recorded no cwd. */
+  get workspace(): ThreadWorkspace | undefined {
+    return this.workspaceValue
+  }
+
   /**
    * Read one retained run for duplicate handling.
    * @param runId - client run identity.
@@ -214,7 +323,49 @@ export class ThreadBinding {
   }
 
   /**
-   * Reserve one run before accepting DSH input.
+   * Admit one run. A history-only run is served at once, even beside an active run, because it
+   * only reads the session log. Any other run waits until this thread is free and reserves it in
+   * the same tick, so two queued runs never race for one reservation.
+   * @param signal - aborted once the waiting client is gone; that run is never admitted.
+   */
+  async admit(input: RunAgentInput, digest: string, signal: AbortSignal): Promise<RunController> {
+    const disconnected = new AgUiGatewayError('CLIENT_DISCONNECTED', 'The AG-UI client left before its queued run started.', 409)
+    if (signal.aborted) throw disconnected
+    if (!hasNewMessages(input.messages)) {
+      this.assertLive()
+      return this.newController(input, digest)
+    }
+    const runId = input.runId
+    const session = String(this.sessionId)
+    const left = Promise.withResolvers<never>()
+    const onAbort = (): void => {
+      this.ctx.logger.debug(`ag-ui: run ${runId} left the queue of session ${session}`)
+      left.reject(disconnected)
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    left.promise.catch(() => {})
+    try {
+      for (;;) {
+        // Settlement and disconnect can happen in the same tick; the race alone is insufficient.
+        if (signal.aborted) throw disconnected
+        if (this.activeRun !== undefined) {
+          this.ctx.logger.debug(`ag-ui: run ${runId} waits for the active run of session ${session}`)
+          await Promise.race([this.activeRun.done, left.promise])
+        } else if (this.pendingCalls.size === 0 && this.liveAgent.status !== 'idle') {
+          // a settled run may leave its finishing or cancelled turn converging; parked calls keep a turn open on purpose
+          this.ctx.logger.debug(`ag-ui: run ${runId} waits for the Agent of session ${session} to settle`)
+          await Promise.race([this.liveAgent.whenIdle(), left.promise])
+        } else {
+          return this.reserveRun(input, digest)
+        }
+      }
+    } finally {
+      signal.removeEventListener('abort', onAbort)
+    }
+  }
+
+  /**
+   * Reserve one run before accepting DSH input; HTTP callers serialize through {@link admit}.
    * @param input - validated AG-UI request.
    * @param digest - exact request-body digest.
    * @returns the sole active controller for this thread.
@@ -240,14 +391,8 @@ export class ThreadBinding {
     if (this.runLedger.size >= this.options.maxRunsPerThread) {
       throw new AgUiGatewayError('RUN_LEDGER_FULL', 'The AG-UI thread run ledger is full.', 429)
     }
-    const record: RunRecord = { digest, events: [], state: 'active', bytes: 0 }
-    this.runLedger.set(input.runId, record)
-    const controller = new RunController(
-      input,
-      record,
-      this.options.maxRunEvents,
-      this.options.maxRunEventBytes,
-    )
+    const controller = this.newController(input, digest)
+    this.runLedger.set(input.runId, controller.record)
     this.activeRun = controller
     void controller.done.then(() => {
       /* v8 ignore next -- terminal settlement runs before another HTTP run can reserve this binding. */
@@ -258,61 +403,65 @@ export class ThreadBinding {
   }
 
   /**
-   * Start a reserved run after its SSE sink is attached.
-   * @param controller - exact controller returned by {@link reserveRun}.
+   * Start an admitted run after its SSE sink is attached.
+   * @param controller - exact controller returned by {@link admit} or {@link reserveRun}; only a history-only run may run unreserved.
    */
   drive(controller: RunController): void {
-    if (this.activeRun !== controller) throw new AgUiGatewayError('RUN_NOT_ACTIVE', 'The AG-UI run lost its reservation.', 409)
+    if (this.activeRun !== controller && hasNewMessages(controller.input.messages)) {
+      throw new AgUiGatewayError('RUN_NOT_ACTIVE', 'The AG-UI run lost its reservation.', 409)
+    }
     controller.start()
-    const history = this.liveAgent.session.snapshotEvents()
-    controller.emit({
-      type: EventType.MESSAGES_SNAPSHOT,
-      messages: this.projection.messagesSnapshot(history, id => this.userMessageIds.get(id)),
-    })
-    // the transcript's settled cards ride beside the snapshot, re-derived from the same durable log
-    for (const view of this.projection.toolViewEvents(history)) controller.emit(view)
-    // a snapshot that overflowed the run budget already settled the run
-    if (controller.record.state !== 'active') return
-    // a restarted thread reports its interrupted turn once so the client can drop parked calls
+    // a restarted thread reports its interrupted turn once, after its history, so the client can drop parked calls
     if (this.interrupted) {
       this.interrupted = false
+      this.emitHistory(controller, [])
       controller.error('THREAD_INTERRUPTED', 'The AG-UI thread was interrupted by a restart; its pending frontend Tool calls are closed.')
       return
     }
     try {
-      const admission = this.classifyMessages(controller.input.messages)
+      const admission = this.classifyMessages(controller.input)
+      if (admission.kind === 'sync') {
+        this.emitHistory(controller, [])
+        controller.success()
+        return
+      }
+      const props = controller.input.forwardedProps
+      const metadata: unknown = isUnknownRecord(props) ? props.toolResultMetadata : undefined
+      if (metadata !== undefined && (!isUnknownRecord(metadata) || !isJsonValue(metadata))) {
+        throw new AgUiGatewayError('INVALID_TOOL_RESULT_METADATA', 'Configured Tool result metadata must be a JSON object.')
+      }
+      this.toolResultMetadata = metadata === undefined ? {} : structuredClone(metadata) as Record<string, JsonValue>
+      this.a2uiRenderTool = a2uiRenderToolName(props)
       if (admission.kind === 'user') {
-        if (this.liveAgent.status !== 'idle' || this.pendingCalls.size !== 0) {
-          throw new AgUiGatewayError('AGENT_BUSY', 'The thread Agent is not ready for a new user run.', 409)
-        }
-        const baseline = this.prepareSharedState(controller.input)
-        this.assertStateToolAvailable(baseline)
-        this.applyFrontendTools(controller.input.tools)
-        this.injectContext(controller.input, baseline)
-        this.commitSharedStateBaseline(baseline)
-        // the client's message id is preserved as the durable id, so a cold resume recovers the mapping
-        const message = freezeMessage({
-          id: MessageId(durableUserId(admission.message.id)),
-          role: 'user',
-          content: [{ type: 'text', text: admission.message.content }],
-          source: { kind: 'user' },
-        })
-        this.acceptedMessages.set(admission.message.id, {
-          role: 'user',
-          digest: messageDigest(admission.message.id, admission.message.content),
-        })
-        controller.messageId = String(message.id)
-        this.userMessageIds.set(String(message.id), admission.message.id)
-        this.liveAgent.followup(message)
+        this.assertUserRunReady()
+        const text = admission.messages.flatMap(message => typeof message.content === 'string'
+          ? [{ message, content: [{ type: 'text' as const, text: message.content }] }]
+          : [])
+        if (text.length === admission.messages.length) this.commitUserMessages(controller, text)
+        else void this.driveContentParts(controller, admission.messages)
+        return
+      }
+
+      if (admission.kind === 'action') {
+        this.driveA2UIAction(controller, admission.action)
         return
       }
 
       const turn = this.continuationTurn(admission.messages)
+      for (const message of admission.messages) {
+        if (message.error === undefined && message.metadata !== undefined && !isJsonValue(message.metadata)) {
+          throw new AgUiGatewayError('INVALID_TOOL_RESULT_METADATA', 'Frontend Tool result metadata must be lossless JSON.')
+        }
+      }
       controller.turn = turn
+      this.emitHistory(controller, [])
+      /* v8 ignore next -- a continuation whose history snapshot overflowed the run budget is already settled; the user path covers the same guard. */
+      if (controller.record.state !== 'active') return
       const baseline = this.prepareSharedState(controller.input)
       this.assertStateToolAvailable(baseline)
       this.stagedTools = controller.input.tools
       this.injectContext(controller.input, baseline)
+      if (admission.action !== undefined) this.injectA2UIAction(admission.action)
       this.commitSharedStateBaseline(baseline)
       for (const message of admission.messages) {
         const pending = this.pendingCalls.get(message.toolCallId)
@@ -322,17 +471,204 @@ export class ThreadBinding {
         }
         this.acceptedMessages.set(message.id, { role: 'tool', digest: valueDigest(message) })
         this.projection.markAwaitingResult(message.toolCallId)
-        if (message.error === undefined) pending.resolve(message.content)
+        if (message.error === undefined) {
+          pending.resolve({
+            content: message.content,
+            ...(message.metadata === undefined ? {} : { presentationMeta: structuredClone(message.metadata) }),
+          })
+        }
         else pending.reject(new Error(`Frontend Tool failed: ${message.error}`))
       }
       // a partial resolution leaves calls parked; finish so the client can answer the rest
       if (this.pendingCalls.size !== 0) controller.success()
     } catch (error) {
-      const failure = error instanceof AgUiGatewayError ? error : new AgUiGatewayError('AGENT_EXECUTION_ERROR', 'The AG-UI run could not start.', 500, error)
-      controller.error(failure.code, failure.message)
-      if (this.liveAgent.status === 'running') {
-        this.liveAgent.cancel({ kind: 'hook', reason: `AG-UI run admission failed: ${failure.code}` })
+      this.failRunAdmission(controller, error)
+    }
+  }
+
+  private assertUserRunReady(): void {
+    if (this.liveAgent.status !== 'idle' || this.pendingCalls.size !== 0) {
+      throw new AgUiGatewayError('AGENT_BUSY', 'The thread Agent is not ready for a new user run.', 409)
+    }
+  }
+
+  /**
+   * Emit the durable transcript beside the user messages this run has just
+   * admitted; the DSH log records those only once the driver claims them.
+   * @param accepted - new client user messages, in arrival order.
+   */
+  private emitHistory(controller: RunController, accepted: readonly AgUiUserMessage[]): void {
+    const events = this.liveAgent.session.snapshotEvents()
+    controller.emit({
+      type: EventType.MESSAGES_SNAPSHOT,
+      messages: [
+        ...this.projection.messagesSnapshot(events, id => this.userMessageIds.get(id)),
+        ...accepted.map(message => ({ id: message.id, role: 'user' as const, content: message.content })),
+      ],
+    })
+    // the transcript's settled cards ride beside the snapshot, re-derived from the same durable log
+    for (const view of this.projection.toolViewEvents(events)) controller.emit(view)
+  }
+
+  private async driveContentParts(controller: RunController, messages: readonly AgUiUserMessage[]): Promise<void> {
+    try {
+      const admitted = []
+      for (const message of messages) {
+        const receipts: FileUploadReceiptId[] = []
+        const content = await this.admitUserContent(typeof message.content === 'string'
+          ? [{ type: 'text', text: message.content }]
+          : message.content as InputContent[], receipts)
+        admitted.push({ message, content, receipts })
       }
+      if (controller.record.state !== 'active') return
+      this.commitUserMessages(controller, admitted)
+    } catch (error) {
+      this.failRunAdmission(controller, error)
+    }
+  }
+
+  /** Queue every admitted user message into one DSH turn, in arrival order. */
+  private commitUserMessages(
+    controller: RunController,
+    admitted: ReadonlyArray<{ message: AgUiUserMessage, content: AdmittedPromptContentPart[], receipts?: FileUploadReceiptId[] }>,
+  ): void {
+    this.emitHistory(controller, admitted.map(item => item.message))
+    // a snapshot that overflowed the run budget already settled the run
+    if (controller.record.state !== 'active') return
+    const baseline = this.prepareSharedState(controller.input)
+    this.assertStateToolAvailable(baseline)
+    this.applyFrontendTools(controller.input.tools)
+    this.injectContext(controller.input, baseline)
+    this.commitSharedStateBaseline(baseline)
+    const durable = admitted.map(({ message: admission, content }) => {
+      // the client's id and exact content parts are preserved, so the snapshot and a cold resume return what was accepted
+      const source = typeof admission.content === 'string'
+        ? { kind: 'user' as const, rpcId: durableUserId(admission.id) }
+        : { kind: 'user' as const, rpcId: durableUserId(admission.id), agUiContent: admission.content }
+      const message: UserMessage = freezeMessage({
+        id: MessageId(durableUserId(admission.id)),
+        role: 'user',
+        content,
+        source,
+      })
+      this.acceptedMessages.set(admission.id, { role: 'user', digest: messageDigest(admission.id, admission.content) })
+      this.userMessageIds.set(String(message.id), admission.id)
+      return message
+    })
+    // a turn claims one next-turn message plus every pending next-step one, so the
+    // earlier messages park at the step boundary and the last one wakes the driver
+    durable.forEach((message, index) => {
+      controller.messageId = String(message.id)
+      const receipts = admitted[index]!.receipts ?? []
+      using binding = receipts.length === 0 ? undefined : this.fileUploads.bindPrompt(this.liveAgent, receipts, String(message.id))
+      if (index < durable.length - 1) this.liveAgent.send(message, 'next-step', false)
+      else this.liveAgent.followup(message)
+      binding?.commit()
+    })
+  }
+
+  private async admitUserContent(content: InputContent[], receipts: FileUploadReceiptId[]): Promise<AdmittedPromptContentPart[]> {
+    if (content.filter(part => part.type !== 'text').length > this.options.maxFilesPerMessage) {
+      throw new AgUiGatewayError('FILE_LIMIT_EXCEEDED', 'The user message contains too many non-text content parts.', 413)
+    }
+    const prompt: AttachmentAdmissionPart[] = []
+    for (const part of content) {
+      if (part.type === 'text') {
+        prompt.push({ type: 'text', text: part.text })
+      } else if (part.type === 'binary' || part.source.type !== 'url') {
+        // only references round-trip through MESSAGES_SNAPSHOT unchanged; inline bytes belong in a thread file
+        throw new AgUiGatewayError('UNSUPPORTED_CONTENT_PART', 'Only text parts and thread file URLs are accepted; upload the file to the thread first.')
+      } else {
+        prompt.push(await this.admitFilePart(part, receipts))
+      }
+    }
+    if (prompt.every(part => part.type === 'text')) return prompt
+    const attachments = this.attachments
+    const attachment = await import('@deepseek-ai/dsh-attachment')
+    try {
+      return await attachments.admitPromptContent(prompt)
+    } catch (error) {
+      if (error instanceof attachment.AttachmentError) {
+        throw new AgUiGatewayError(error.code, error.message, 400, error)
+      }
+      throw error
+    }
+  }
+
+  /** Official service, optional for hosts that only accept text. */
+  private get fileUploads(): FileUploads {
+    const uploads = this.ctx.get('fileUploads')
+    if (uploads === undefined) throw new AgUiGatewayError('FILES_UNSUPPORTED', 'This Host does not provide native file uploads.', 409)
+    return uploads
+  }
+
+  private get attachments(): AttachmentStore {
+    const attachments = this.ctx.get('attachments')
+    if (attachments === undefined) throw new AgUiGatewayError('FILES_UNSUPPORTED', 'This Host does not provide attachment storage.', 409)
+    return attachments
+  }
+
+  async uploadFile(data: AsyncIterable<Uint8Array>, name: string, signal?: AbortSignal): Promise<FileUploadValue> {
+    const uploads = this.fileUploads
+    using _activity = this.holdFileActivity()
+    return await uploads.uploadStream({ sessionId: this.sessionId, data, name, ...(signal === undefined ? {} : { signal }) })
+  }
+
+  fileUrl(path: string, upload: FileUploadValue): string {
+    if (this.options.fileSecret === undefined) throw new Error('ag-ui: file URL signing is not configured')
+    return signedFileUrl(path, this.identity.threadId, String(this.sessionId), this.options.fileSecret, upload)
+  }
+
+  fileFromUrl(value: string): FileUploadValue {
+    if (this.options.fileSecret === undefined) throw new AgUiGatewayError('FILE_NOT_FOUND', 'The requested file was not found.', 404)
+    return verifiedFileUrl(value, this.identity.threadId, String(this.sessionId), this.options.fileSecret)
+  }
+
+  async *readFile(file: FileAttachmentRef): AsyncIterable<Uint8Array> {
+    const attachments = this.attachments
+    using _activity = this.holdFileActivity()
+    yield* attachments.readFileStream(file)
+  }
+
+  /** Keep the native Session and its receipts alive until every concurrent file operation settles. */
+  private holdFileActivity(): Disposable {
+    this.assertLive()
+    this.activeFileOperations += 1
+    this.clearIdleExpiry()
+    return {
+      [Symbol.dispose]: () => {
+        this.activeFileOperations -= 1
+        this.scheduleIdleExpiry()
+      },
+    }
+  }
+
+  private async admitFilePart(part: Exclude<InputContent, { type: 'text' | 'binary' }>, receipts: FileUploadReceiptId[]): Promise<AttachmentAdmissionPart> {
+    const upload = this.fileFromUrl(part.source.value)
+    if (this.fileUploads.resolve(this.liveAgent, upload.receiptId) === undefined) {
+      throw new AgUiGatewayError('FILE_NOT_STAGED', 'Upload the file again before attaching it to a new prompt.', 400)
+    }
+    receipts.push(upload.receiptId)
+    const mediaType = part.source.mimeType ?? 'application/octet-stream'
+    if (part.type === 'image' || isImageMediaType(mediaType)) {
+      if (!isImageMediaType(mediaType)) throw new AgUiGatewayError('UNSUPPORTED_MEDIA_TYPE', 'The image media type is not supported.')
+      if (upload.file.bytes > this.attachments.imageLimits.maxImageBytes) {
+        throw new AgUiGatewayError('ATTACHMENT_TOO_LARGE', 'The image exceeds its byte limit.', 413)
+      }
+      const chunks: Uint8Array[] = []
+      for await (const chunk of this.readFile(upload.file)) chunks.push(chunk)
+      return { type: 'image', mediaType, data: Buffer.concat(chunks).toString('base64'), name: upload.file.name }
+    }
+    return { type: 'file', attachment: upload.file }
+  }
+
+  private failRunAdmission(controller: RunController, error: unknown): void {
+    const failure = error instanceof AgUiGatewayError ? error : new AgUiGatewayError('AGENT_EXECUTION_ERROR', 'The AG-UI run could not start.', 500, error)
+    controller.error(failure.code, failure.message)
+    const terminal = controller.record.events.at(-1)!
+    if (terminal.code !== 'AG_UI_EVENT_BUFFER_OVERFLOW' && this.activeRun === controller
+      && controller.turn !== undefined && this.liveAgent.status === 'running') {
+      this.liveAgent.cancel({ kind: 'hook', reason: `AG-UI run admission failed: ${failure.code}` })
     }
   }
 
@@ -370,18 +706,31 @@ export class ThreadBinding {
     if (handle !== undefined) await handle.dispose()
   }
 
+  private newController(input: RunAgentInput, digest: string): RunController {
+    const record: RunRecord = { digest, events: [], state: 'active', bytes: 0 }
+    return new RunController(input, record, this.options.maxRunEvents, this.options.maxRunEventBytes, controller => {
+      if (this.activeRun === controller && controller.turn !== undefined && this.agent?.status === 'running') {
+        this.agent.cancel({ kind: 'hook', reason: 'AG-UI run event buffer overflow' })
+      }
+    })
+  }
+
   private assertLive(): void {
     if (this.disposed || this.handle === undefined) {
       throw new AgUiGatewayError('AGENT_NOT_AVAILABLE', 'The AG-UI thread Agent is unavailable.', 410)
     }
   }
 
-  private classifyMessages(messages: AgUiMessage[]):
-    | { kind: 'user'; message: AgUiUserMessage & { content: string } }
-    | { kind: 'tools'; messages: AgUiToolMessage[] } {
-    const users: Array<AgUiUserMessage & { content: string }> = []
+  /** Sort a run's new messages: user messages open a turn, Tool results continue one, none at all only synchronizes history. */
+  private classifyMessages(input: RunAgentInput):
+    | { kind: 'sync' }
+    | { kind: 'user'; messages: AgUiUserMessage[] }
+    | { kind: 'action'; action: A2UIActionContinuation }
+    | { kind: 'tools'; messages: AgUiToolMessage[]; action?: A2UIActionContinuation } {
+    const action = a2uiActionContinuation(input)
+    const users: AgUiUserMessage[] = []
     const tools: AgUiToolMessage[] = []
-    for (const message of messages) {
+    for (const message of input.messages) {
       if (message.role !== 'user' && message.role !== 'tool') continue
       const digest = valueDigest(message)
       const accepted = this.acceptedMessages.get(message.id)
@@ -392,6 +741,7 @@ export class ThreadBinding {
         continue
       }
       if (message.role === 'tool') {
+        if (action?.result.id === message.id) continue
         if (this.pendingCalls.has(message.toolCallId)) tools.push(message)
         else if (this.projection.consumeServerResult(message.toolCallId)) {
           this.acceptedMessages.set(message.id, { role: 'tool', digest })
@@ -399,18 +749,58 @@ export class ThreadBinding {
           throw new AgUiGatewayError('UNKNOWN_TOOL_RESULT', 'The Tool result has no pending or completed server call.', 409)
         }
       } else {
-        if (typeof message.content !== 'string') {
-          throw new AgUiGatewayError('UNSUPPORTED_MESSAGE_CONTENT', 'V1 accepts text user messages only.')
-        }
-        users.push(message as AgUiUserMessage & { content: string })
+        users.push(message)
       }
     }
-    if (users.length === 1 && tools.length === 0) return { kind: 'user', message: users[0] as AgUiUserMessage & { content: string } }
-    if (users.length === 0 && tools.length > 0) return { kind: 'tools', messages: tools }
-    throw new AgUiGatewayError(
-      'INVALID_MESSAGE_BATCH',
-      'A run must contain one new user message or one or more new frontend Tool results.',
-    )
+    if (users.length > 0 && tools.length > 0) {
+      throw new AgUiGatewayError('INVALID_MESSAGE_BATCH', 'A run cannot mix new user messages with new frontend Tool results.')
+    }
+    if (users.length > 0 && action !== undefined) {
+      throw new AgUiGatewayError('INVALID_MESSAGE_BATCH', 'A run cannot mix new user messages with an A2UI user action.')
+    }
+    if (users.length > 0) return { kind: 'user', messages: users }
+    if (tools.length > 0) return { kind: 'tools', messages: tools, ...(action === undefined ? {} : { action }) }
+    if (action !== undefined) return { kind: 'action', action }
+    return { kind: 'sync' }
+  }
+
+  /** Start a new DSH turn for one validated middleware user action. */
+  private driveA2UIAction(controller: RunController, action: A2UIActionContinuation): void {
+    this.assertUserRunReady()
+    this.emitHistory(controller, [])
+    /* v8 ignore next -- the shared history-budget tests cover this guard; the action path reuses the same controller settlement. */
+    if (controller.record.state !== 'active') return
+    const baseline = this.prepareSharedState(controller.input)
+    this.assertStateToolAvailable(baseline)
+    this.applyFrontendTools(controller.input.tools)
+    this.injectContext(controller.input, baseline)
+    this.commitSharedStateBaseline(baseline)
+    const message = this.a2uiActionMessage(action)
+    controller.messageId = String(message.id)
+    this.liveAgent.followup(message)
+  }
+
+  /** Add an action to the next step of the still-open render turn. */
+  private injectA2UIAction(action: A2UIActionContinuation): void {
+    this.liveAgent.inject(this.a2uiActionMessage(action))
+  }
+
+  /** Materialize one accepted action as durable DSH plugin context. */
+  private a2uiActionMessage(action: A2UIActionContinuation): UserMessage {
+    this.acceptedMessages.set(action.result.id, { role: 'tool', digest: action.digest })
+    return createUserMessage({
+      // forwardedProps is already bounded at HTTP admission; keep its complete validated action in durable model context
+      content: [{
+        type: 'text',
+        text: `${action.result.content}\n\nA2UI user action JSON: ${canonicalJsonStringify(action.action)}`,
+      }],
+      source: {
+        kind: 'plugin',
+        plugin: 'ag-ui',
+        form: 'notice',
+        summary: 'A2UI user action',
+      },
+    })
   }
 
   private continuationTurn(messages: AgUiToolMessage[]): number {
@@ -588,15 +978,30 @@ export class ThreadBinding {
       description: item.tool.description,
       parameters: item.schema,
       output: {
-        schema: { type: 'string' },
+        schema: {
+          type: 'object',
+          properties: {
+            content: { type: 'string' },
+            presentationMeta: { type: 'object', additionalProperties: true },
+          },
+          required: ['content'],
+          additionalProperties: false,
+        },
         render(_args, value) {
-          return [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value) }]
+          const result = value as unknown as FrontendToolResultValue
+          return [{ type: 'text', text: result.content }]
+        },
+        presentationMeta(_args, value) {
+          const result = value as unknown as FrontendToolResultValue
+          return result.presentationMeta ?? null
         },
       },
       presentCall: args => ({ card: 'generic', title: item.tool.description, rawInput: args }),
       // parking holds no server-side resource, so calls of one step may overlap
       isConcurrencySafe: () => true,
-      execute: (args, exec) => this.parkFrontendTool(item.tool.name, item.schema, args, exec),
+      execute: (args, exec) => item.tool.name === this.a2uiRenderTool
+        ? settleA2UIRender(item.schema, args, this.toolResultMetadata[item.tool.name])
+        : this.parkFrontendTool(item.tool.name, item.schema, args, exec),
     }
   }
 
@@ -605,9 +1010,8 @@ export class ThreadBinding {
     schema: ObjectJsonSchema,
     args: unknown,
     exec: ToolRunContext,
-  ): Promise<string> {
-    const violations = validateJsonSchemaValue(schema, args, '')
-    if (violations.length > 0) throw new Error(`Invalid frontend Tool arguments: ${violations.join('; ')}`)
+  ): Promise<FrontendToolResultValue> {
+    assertFrontendToolArgs(schema, args)
     const callId = String(exec.callId)
     const lifecycle = this.projection.lifecycleOf(callId)
     if (lifecycle?.kind !== 'backend' || lifecycle.name !== name) throw new Error('Frontend Tool call has no DSH call position')
@@ -616,7 +1020,7 @@ export class ThreadBinding {
     if (active !== undefined && active.turn !== lifecycle.turn) throw new Error('Frontend Tool call has no active AG-UI run')
     this.projection.markParked(callId, lifecycle)
 
-    const deferred = Promise.withResolvers<string>()
+    const deferred = Promise.withResolvers<FrontendToolResultValue>()
     let settled = false
     const settle = (operation: () => void): void => {
       /* v8 ignore next -- late timeout, abort, or browser completion is an idempotent no-op. */
@@ -645,7 +1049,10 @@ export class ThreadBinding {
     this.pendingCalls.set(callId, pending)
     this.clearIdleExpiry()
     if (active !== undefined
-      && this.projection.parkSettleReady(lifecycle.turn, lifecycle.step, this.startsWhileParked)) active.success()
+      && this.projection.parkSettleReady(lifecycle.turn, lifecycle.step, this.startsWhileParked)) {
+      this.emitFinalSnapshot(active)
+      active.success()
+    }
     return deferred.promise
   }
 
@@ -664,6 +1071,9 @@ export class ThreadBinding {
     }
     if (active === undefined || active.turn === undefined) return
     if (step.outcome !== undefined) {
+      // This durable turn is over; a large final snapshot must not cancel a later turn.
+      active.turn = undefined
+      this.emitFinalSnapshot(active)
       if (step.outcome.kind === 'success') active.success()
       else active.error(step.outcome.code, step.outcome.message)
       return
@@ -673,13 +1083,22 @@ export class ThreadBinding {
     // a frontend call settles at its own park instead
     if (event.type === 'tool/call'
       && this.projection.parkSettleReady(event.data.turn, event.data.step, this.startsWhileParked)) {
+      this.emitFinalSnapshot(active)
       active.success()
     }
+  }
+
+  private emitFinalSnapshot(controller: RunController): void {
+    controller.emit({
+      type: EventType.MESSAGES_SNAPSHOT,
+      messages: this.projection.messagesSnapshot(this.liveAgent.session.snapshotEvents(), id => this.userMessageIds.get(id)),
+    })
   }
 
   private onAgentError(error: unknown): void {
     const active = this.activeRun
     if (active === undefined || active.record.state !== 'active') return
+    this.emitFinalSnapshot(active)
     active.error('AGENT_EXECUTION_ERROR', errorChain(error))
   }
 
@@ -721,7 +1140,7 @@ export class ThreadBinding {
 
   private scheduleIdleExpiry(): void {
     this.clearIdleExpiry()
-    if (this.disposed || this.pendingCalls.size !== 0 || this.activeRun !== undefined) return
+    if (this.disposed || this.activeFileOperations !== 0 || this.pendingCalls.size !== 0 || this.activeRun !== undefined) return
     this.idleTimer = setTimeout(() => { this.onExpired(this) }, this.options.threadIdleMs)
   }
 }
@@ -733,13 +1152,149 @@ function isEmptyStateContainer(value: unknown): boolean {
 }
 
 /** Digest one accepted user message in a fixed field order, stable across cold resume. */
-function messageDigest(clientId: string, content: string): string {
+function messageDigest(clientId: string, content: AgUiUserMessage['content']): string {
   return valueDigest({ id: clientId, role: 'user', content })
+}
+
+/** Narrow the four image formats accepted by prompt attachment admission. */
+function isImageMediaType(value: string): value is ImageMediaType {
+  return IMAGE_MEDIA_TYPES.has(value)
+}
+
+/** Resolve the optional host workspace registry without requiring the package. */
+function workspaceRegistryOf(ctx: Context): WorkspaceRegistryLike | undefined {
+  return (ctx as Context & { get(name: string): unknown }).get('workspaceRegistry') as WorkspaceRegistryLike | undefined
 }
 
 /** Narrow a JSON object without accepting arrays or null. */
 function isUnknownRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function assertFrontendToolArgs(schema: ObjectJsonSchema, args: unknown): void {
+  const violations = validateJsonSchemaValue(schema, args, '')
+  if (violations.length > 0) throw new Error(`Invalid frontend Tool arguments: ${violations.join('; ')}`)
+}
+
+/** Answer a middleware-injected render call at once: the middleware renders from the streamed arguments and never sends a browser result. */
+function settleA2UIRender(schema: ObjectJsonSchema, args: unknown, presentationMeta: JsonValue | undefined): Promise<FrontendToolResultValue> {
+  assertFrontendToolArgs(schema, args)
+  return Promise.resolve({ content: A2UI_RENDERED_RESULT, ...(presentationMeta === undefined ? {} : { presentationMeta }) })
+}
+
+/** Name of the render Tool A2UIMiddleware flags in forwardedProps; `true` selects its default name. */
+function a2uiRenderToolName(forwardedProps: RunAgentInput['forwardedProps']): string | undefined {
+  if (!isUnknownRecord(forwardedProps) || !Object.hasOwn(forwardedProps, 'injectA2UITool')) return undefined
+  const value = forwardedProps.injectA2UITool
+  if (value === true) return A2UI_RENDER_TOOL_NAME
+  return typeof value === 'string' ? value : undefined
+}
+
+/** Validate the exact synthetic pair appended by the official A2UI middleware. */
+function a2uiActionContinuation(input: RunAgentInput): A2UIActionContinuation | undefined {
+  const action = readA2UIUserAction(input.forwardedProps)
+  if (action === undefined) return undefined
+  const assistant = input.messages.at(-2)
+  const result = input.messages.at(-1)
+  const call = assistant?.role === 'assistant' && assistant.toolCalls?.length === 1
+    ? assistant.toolCalls[0]
+    : undefined
+  if (assistant?.role !== 'assistant'
+    || assistant.content !== ''
+    || call?.type !== 'function'
+    || call.function.name !== A2UI_ACTION_TOOL_NAME
+    || result?.role !== 'tool'
+    || result.toolCallId !== call.id) {
+    throw new AgUiGatewayError(
+      'INVALID_A2UI_ACTION',
+      'The A2UI user action is missing its official synthetic Tool-call pair.',
+    )
+  }
+  let argumentsValue: unknown
+  try {
+    argumentsValue = JSON.parse(call.function.arguments)
+  } catch (error) {
+    throw new AgUiGatewayError('INVALID_A2UI_ACTION', 'The A2UI user action arguments are invalid.', 400, error)
+  }
+  if (!isDeepStrictEqual(argumentsValue, action) || result.content !== formatA2UIActionResult(action)) {
+    throw new AgUiGatewayError('INVALID_A2UI_ACTION', 'The A2UI user action does not match its synthetic Tool-call pair.')
+  }
+  return { action, result, digest: valueDigest(result) }
+}
+
+/** Read the bounded user-action shape carried in forwardedProps by A2UIMiddleware. */
+function readA2UIUserAction(forwardedProps: RunAgentInput['forwardedProps']): A2UIUserAction | undefined {
+  if (!isUnknownRecord(forwardedProps) || !Object.hasOwn(forwardedProps, 'a2uiAction')) return undefined
+  const envelope = forwardedProps.a2uiAction
+  if (!isUnknownRecord(envelope)
+    || !Object.hasOwn(envelope, 'userAction')
+    || Object.keys(envelope).some(key => key !== 'userAction')) {
+    throw new AgUiGatewayError('INVALID_A2UI_ACTION', 'The A2UI action envelope is invalid.')
+  }
+  const value = envelope.userAction
+  const allowed = new Set(['name', 'surfaceId', 'sourceComponentId', 'context', 'timestamp'])
+  if (!isUnknownRecord(value) || Object.keys(value).some(key => !allowed.has(key))) {
+    throw new AgUiGatewayError('INVALID_A2UI_ACTION', 'The A2UI user action is invalid.')
+  }
+  for (const field of ['name', 'surfaceId', 'sourceComponentId', 'timestamp'] as const) {
+    if (value[field] !== undefined && typeof value[field] !== 'string') {
+      throw new AgUiGatewayError('INVALID_A2UI_ACTION', `The A2UI user action ${field} must be a string.`)
+    }
+  }
+  if (value.context !== undefined && !isUnknownRecord(value.context)) {
+    throw new AgUiGatewayError('INVALID_A2UI_ACTION', 'The A2UI user action context must be an object.')
+  }
+  const name = typeof value.name === 'string' ? value.name : undefined
+  const surfaceId = typeof value.surfaceId === 'string' ? value.surfaceId : undefined
+  const sourceComponentId = typeof value.sourceComponentId === 'string' ? value.sourceComponentId : undefined
+  const context = isUnknownRecord(value.context) ? value.context : undefined
+  const timestamp = typeof value.timestamp === 'string' ? value.timestamp : undefined
+  return {
+    ...(name === undefined ? {} : { name }),
+    ...(surfaceId === undefined ? {} : { surfaceId }),
+    ...(sourceComponentId === undefined ? {} : { sourceComponentId }),
+    ...(context === undefined ? {} : { context: structuredClone(context) }),
+    ...(timestamp === undefined ? {} : { timestamp }),
+  }
+}
+
+/** Match the official middleware's model-facing Tool result text exactly. */
+function formatA2UIActionResult(action: A2UIUserAction): string {
+  const actionName = action.name ?? 'unknown_action'
+  const surfaceId = action.surfaceId ?? 'unknown_surface'
+  let message = `User performed action "${actionName}" on surface "${surfaceId}"`
+  if (action.sourceComponentId) message += ` (component: ${action.sourceComponentId})`
+  message += `. Context: ${action.context === undefined ? '{}' : JSON.stringify(action.context)}`
+  return message
+}
+
+/** Serialize JSON with recursively sorted object keys and locale-independent ordering. */
+function canonicalJsonStringify(value: unknown): string {
+  const encoded = writeCanonicalJson(value)
+  /* v8 ignore next -- admitted A2UI actions and contexts are objects, which the writer always encodes. */
+  if (encoded === undefined) throw new TypeError('A2UI action values must be JSON-serializable')
+  return encoded
+}
+
+function writeCanonicalJson(value: unknown): string | undefined {
+  if (Array.isArray(value)) {
+    const items = Array.from(value, item => {
+      const encoded = writeCanonicalJson(item)
+      /* v8 ignore next -- parsed AG-UI JSON arrays cannot contain undefined, but canonical JSON represents sparse JS values as null. */
+      return encoded ?? 'null'
+    })
+    return `[${items.join(',')}]`
+  }
+  if (!isUnknownRecord(value)) return JSON.stringify(value)
+  const entries: string[] = []
+  const keys = Object.keys(value).sort((left, right) => left < right ? -1 : 1)
+  for (const key of keys) {
+    const encoded = writeCanonicalJson(value[key])
+    /* v8 ignore next -- parsed AG-UI JSON objects cannot contain undefined, but canonical JSON omits such JS properties. */
+    if (encoded === undefined) continue
+    entries.push(`${JSON.stringify(key)}:${encoded}`)
+  }
+  return `{${entries.join(',')}}`
 }
 
 /** Read the state-management Tool input after model-boundary validation. */
