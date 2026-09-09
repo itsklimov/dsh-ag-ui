@@ -107,6 +107,7 @@ lease.dispose()
 | `path` | `/ag-ui` | Run 与 file 使用的 Host HTTP route base |
 | `provider` | 必填 | 已注册 DSH model provider route |
 | `model` | 必填 | Provider 持有的 model ID |
+| `workspaceRoot` | `<DSH_HOME>/workspaces` | 按 durable session id 命名的 thread workspace 目录根路径 |
 | `agentPreset` | 无 | 组合进每个线程的部署级默认 agent preset id |
 | `tenantPresets` | `{}` | 按租户覆盖 `agentPreset` 的 preset id 映射 |
 | `sharedSecret` | 必填 | 仅与可信 BFF 共享的 bearer secret |
@@ -140,6 +141,8 @@ lease.dispose()
 客户端更换代理前缀时必须保留返回 URL 的 query。Gateway 为认证 session 的原生文件引用和 receipt 签名。`GET` 校验签名及 principal/thread 映射后调用官方流式 reader。同名上传保留显示名称，但获得不同的 receipt URL。冷恢复后仍可授权下载；轮换 shared secret 会使旧 URL 失效。原生上传接入前的无签名 URL 需要重新上传。
 
 User message 接受有序的 text 和带签名的 thread-file URL parts。图片走官方 image admission，其他文件成为原生 file content parts。Harness 负责 receipt 绑定、成功 admission 后的回收，以及队列投递失败时的回滚。被拒绝的 admission 可以使用仍处于 staged 状态的 receipt 重试。已消费、显式回收或冷启动后尚未发送的 receipt 返回 `FILE_NOT_STAGED`，需要重新上传；Gateway 不会恢复过期授权。`MESSAGES_SNAPSHOT` 保留实际接受的完整 AG-UI parts。异步文件处理后会重新校验 shared-state 和 frontend Tool admission，再发布这些 parts。不接受 inline data parts。
+
+每个 thread 使用 `<workspaceRoot>/<sessionId>` 作为 DSH working directory。目录按 durable session id 命名，客户端 thread id 不会落盘。Host 提供 `workspaceRegistry` 时，Gateway 会为 DSH Web 注册新 workspace。
 
 `maxRunEvents` 必须至少容纳 mandatory opening 与 terminal events。`maxRunEventBytes` 会限制包含 `RUN_STARTED` 和 terminal event 在内的完整 retained Run record，并且必须足以容纳已配置的最大 identity length。非 loopback DSH WebServer 需要设置 `allowNonLoopback: true`。推荐把 Gateway 保持在 loopback，并放在同 Host 的 authenticated BFF 后面。
 
