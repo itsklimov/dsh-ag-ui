@@ -320,3 +320,81 @@ it('refuses to drive a detached resume-only controller a second time', async () 
   expect(() => binding.drive(controller)).toThrow('lost its reservation')
   expect(effects()).toBe(1)
 })
+
+it.each([false, true])('commits concurrent shared-state work after a human interrupt, with continuation reserved: %s', async (reserveContinuation) => {
+  const { ctx, binding } = await mount([
+    { callId: 'ask-parallel', name: 'ask_parallel', args: {} },
+    { callId: 'state-parallel', name: 'ag_ui_update_state', args: { state_updates: { value: 1 } } },
+  ])
+  const statePrepared = Promise.withResolvers<void>()
+  const releaseState = Promise.withResolvers<void>()
+  ctx.on('tools/execute', async (exec, next) => {
+    if (exec.name === 'ag_ui_update_state') await releaseState.promise
+    try { return await next() } finally { if (exec.name === 'ag_ui_update_state') statePrepared.resolve() }
+  })
+  ctx.tools.register({ name: 'ask_parallel', description: 'Concurrent human request.', parameters: { type: 'object', properties: {} },
+    output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
+    isConcurrencySafe: () => true,
+    execute: async (_args, exec) => {
+      await ctx.userQuestions.ask({ agent: exec.agent!, signal: exec.signal, questions: [{ id: 'choice', question: 'Continue?' }] })
+      return 'answered'
+    } })
+  const [question] = interrupts(await run(binding, input('first', { messages: [user], state: { value: 0 } })))
+  const request = input('answer', { state: { value: 0 }, resume: [{ interruptId: question!.id, status: 'resolved', payload: { answers: [{ id: 'choice', selected: [], custom: 'yes' }] } }] })
+  const reserved = reserveContinuation ? await binding.admit(request, 'answer', new AbortController().signal) : undefined
+  releaseState.resolve()
+  // A later parallel result is prepared now, but its durable commit waits behind the question.
+  await statePrepared.promise
+  if (reserved === undefined) await run(binding, request)
+  else {
+    if ('replay' in reserved) throw new Error('Unexpected replay')
+    binding.drive(reserved)
+    await reserved.done
+  }
+  const stateResult = binding.liveAgent.session.snapshotEvents().filter(event => event.type === 'tool/result')
+    .find(event => event.data.message.content[0].toolCallId === 'state-parallel')
+  expect(stateResult?.data.message.content[0]).toMatchObject({ isError: false, content: [{ type: 'text', text: JSON.stringify({ status: 'updated', state: { value: 1 } }) }] })
+  const history = await run(binding, input('history'))
+  expect(history.find(event => event.type === EventType.STATE_SNAPSHOT)).toMatchObject({ snapshot: { value: 1 } })
+})
+
+it('parks a late frontend call while the human continuation is reserved but not driven', async () => {
+  const { ctx, binding } = await mount([
+    { callId: 'ask-parallel', name: 'ask_parallel', args: {} },
+    { callId: 'frontend-call', name: frontend.name, args: {} },
+  ])
+  const prepareEntered = Promise.withResolvers<void>()
+  const releasePrepare = Promise.withResolvers<void>()
+  const frontendStarted = Promise.withResolvers<void>()
+  ctx.on('tools/pre-execute', async (exec, next) => {
+    if (exec.name === frontend.name) { prepareEntered.resolve(); await releasePrepare.promise }
+    return next()
+  })
+  ctx.on('tools/execute', (exec, next) => {
+    const result = next()
+    if (exec.name === frontend.name) frontendStarted.resolve()
+    return result
+  })
+  ctx.tools.register({ name: 'ask_parallel', description: 'Concurrent human request.', parameters: { type: 'object', properties: {} },
+    output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: String(value) }] },
+    isConcurrencySafe: () => true,
+    execute: async (_args, exec) => {
+      await ctx.userQuestions.ask({ agent: exec.agent!, signal: exec.signal, questions: [{ id: 'choice', question: 'Continue?' }] })
+      return 'answered'
+    } })
+  const [question] = interrupts(await run(binding, input('first', { messages: [user] })))
+  await prepareEntered.promise
+  const request = input('answer', { resume: [{ interruptId: question!.id, status: 'resolved', payload: { answers: [{ id: 'choice', selected: [], custom: 'yes' }] } }] })
+  const controller = await binding.admit(request, 'answer', new AbortController().signal)
+  if ('replay' in controller) throw new Error('Unexpected replay')
+  expect(controller.turn).toBeUndefined()
+  releasePrepare.resolve()
+  await frontendStarted.promise
+  await new Promise(resolve => setImmediate(resolve))
+  binding.drive(controller)
+  await controller.done
+  await run(binding, input('frontend-answer', { messages: [{ id: 'frontend-result', role: 'tool', toolCallId: 'frontend-call', content: 'chosen' }] }))
+  const result = binding.liveAgent.session.snapshotEvents().filter(event => event.type === 'tool/result')
+    .find(event => event.data.message.content[0].toolCallId === 'frontend-call')
+  expect(result?.data.message.content[0]).toMatchObject({ isError: false, content: [{ type: 'text', text: 'chosen' }] })
+})
