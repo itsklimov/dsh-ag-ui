@@ -76,7 +76,6 @@ describe('ThreadBinding durable resume', () => {
     const binding = bindingFor(first.ctx, first.root)
     await binding.initialize()
     const cwd = await realpath(join(first.root, 'workspaces', String(SESSION)))
-    expect(binding.workspace).toEqual({ cwd })
     expect(binding.liveAgent.session.header.cwd).toBe(cwd)
     expect((await stat(cwd)).isDirectory()).toBe(true)
     const run = binding.reserveRun(input('run-resume-1', [{ id: 'user-resume-1', role: 'user', content: 'Set the codeword.' }]), 'digest-resume-1')
@@ -101,7 +100,7 @@ describe('ThreadBinding durable resume', () => {
     const second = await mountDurable([textResponse('History kept the codeword pine-cone-7.')], first.root)
     const resumed = bindingFor(second.ctx, second.root)
     await resumed.initialize()
-    expect(resumed.workspace).toEqual(binding.workspace)
+    expect(resumed.liveAgent.session.header.cwd).toBe(cwd)
     expect(String(resumed.sessionId)).toBe(String(SESSION))
     expect(resumed.liveAgent.session.snapshotEvents().some(item =>
       item.type === 'assistant/message' && JSON.stringify(item.data).includes('pine-cone-7'))).toBe(true)
@@ -135,7 +134,7 @@ describe('ThreadBinding durable resume', () => {
     const resumed = bindingFor(mounted.ctx, mounted.root, RC2_SESSION)
     const warn = vi.spyOn(mounted.ctx.logger, 'warn')
     await resumed.initialize()
-    expect(resumed.workspace).toBeUndefined()
+    expect(resumed.liveAgent.session.header.cwd).toBeUndefined()
     expect(warn).toHaveBeenCalledOnce()
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('without a workspace cwd'))
     expect(resumed.liveAgent.session.snapshotEvents().some(event =>

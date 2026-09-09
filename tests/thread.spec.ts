@@ -83,7 +83,7 @@ function input(runId: string, messages: RunAgentInput['messages'], tools: Tool[]
 describe('thread workspaces', () => {
   it('creates a workspace without a registry and registers once when one is present', async () => {
     const headless = await mount()
-    expect((await stat(headless.binding.workspace?.cwd ?? '')).isDirectory()).toBe(true)
+    expect((await stat(headless.binding.liveAgent.session.header.cwd ?? '')).isDirectory()).toBe(true)
 
     const ctx = new Context()
     contexts.push(ctx)
@@ -103,8 +103,8 @@ describe('thread workspaces', () => {
     )
     await binding.initialize()
     expect(create).toHaveBeenCalledOnce()
-    expect(create).toHaveBeenCalledWith(binding.workspace?.cwd, 'ag-ui-registry-session')
-    expect(binding.workspace?.cwd).not.toContain('registry-thread')
+    expect(create).toHaveBeenCalledWith(binding.liveAgent.session.header.cwd, 'ag-ui-registry-session')
+    expect(binding.liveAgent.session.header.cwd).not.toContain('registry-thread')
   })
 
   it('keeps workspace registry failures loud', async () => {
