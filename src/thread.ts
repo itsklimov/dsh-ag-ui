@@ -77,7 +77,6 @@ interface A2UIUserAction {
 interface A2UIActionContinuation {
   readonly action: A2UIUserAction
   readonly result: AgUiToolMessage
-  readonly digest: string
 }
 
 interface FrontendToolRegistration {
@@ -562,7 +561,8 @@ export class ThreadBinding {
     | { kind: 'user'; messages: TextUserMessage[]; echoes: AgUiToolMessage[] }
     | { kind: 'action'; action: A2UIActionContinuation; echoes: AgUiToolMessage[] }
     | { kind: 'tools'; messages: AgUiToolMessage[]; action?: A2UIActionContinuation; echoes: AgUiToolMessage[] } {
-    const action = a2uiActionContinuation(input)
+    const continuation = a2uiActionContinuation(input)
+    const action = continuation === undefined ? undefined : this.pendingA2UIAction(continuation)
     const users: TextUserMessage[] = []
     const tools: AgUiToolMessage[] = []
     const echoes: AgUiToolMessage[] = []
@@ -583,7 +583,7 @@ export class ThreadBinding {
       if (message.role === 'tool') {
         if (callIds.has(message.toolCallId)) throw new AgUiGatewayError('INVALID_TOOL_RESULT_BATCH', 'A Tool call must be answered once.')
         callIds.add(message.toolCallId)
-        if (action?.result.id === message.id) continue
+        if (continuation?.result.id === message.id) continue
         if (this.pendingCalls.has(message.toolCallId)) tools.push(message)
         else if (this.projection.hasServerResult(message.toolCallId)) {
           echoes.push(message)
@@ -638,10 +638,26 @@ export class ThreadBinding {
     this.liveAgent.inject(this.a2uiActionMessage(action))
   }
 
-  /** Materialize one accepted action as durable DSH plugin context. */
+  /** Native inbox and consumed input own action admission, including after restart. */
+  private pendingA2UIAction(action: A2UIActionContinuation): A2UIActionContinuation | undefined {
+    const message = this.a2uiActionMessage(action)
+    const accepted = [
+      ...this.liveAgent.inbox.nextTurn,
+      ...this.liveAgent.inbox.nextStep,
+      ...consumedMessages(this.liveAgent.session.snapshotEvents()),
+    ].find(candidate => candidate.id === message.id)
+    if (accepted === undefined) return action
+    if (!isDeepStrictEqual(accepted, message)) {
+      throw new AgUiGatewayError('MESSAGE_ID_CONFLICT', 'An A2UI action id was reused with different content.', 409)
+    }
+    return undefined
+  }
+
+  /** Materialize one action as durable DSH plugin context with its producer identity. */
   private a2uiActionMessage(action: A2UIActionContinuation): UserMessage {
-    this.acceptedMessages.set(action.result.id, { role: 'tool', digest: action.digest })
-    return createUserMessage({
+    return freezeMessage({
+      id: MessageId(`ag-ui:a2ui:${action.result.id}`),
+      role: 'user',
       // forwardedProps is already bounded at HTTP admission; keep its complete validated action in durable model context
       content: [{
         type: 'text',
@@ -1066,7 +1082,7 @@ function a2uiActionContinuation(input: RunAgentInput): A2UIActionContinuation | 
   if (!isDeepStrictEqual(argumentsValue, action) || result.content !== formatA2UIActionResult(action)) {
     throw new AgUiGatewayError('INVALID_A2UI_ACTION', 'The A2UI user action does not match its synthetic Tool-call pair.')
   }
-  return { action, result, digest: valueDigest(result) }
+  return { action, result }
 }
 
 /** Read the bounded user-action shape carried in forwardedProps by A2UIMiddleware. */
