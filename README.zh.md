@@ -17,6 +17,7 @@
 - 可使用 `dsh plugin add` 安装的 DSH Profile Bundle
 - 下限式 AG-UI 协议范围（`~0.0.59`）
 - 使用可信 tenant/user headers 的 BFF-to-Gateway 认证
+- 按 thread 流式上传文件并通过认证 route 下载
 - `(tenantId, userId, threadId)` 到 DSH Agent 的进程内绑定
 - AG-UI 文本流与 backend Tool result 投影
 - 由 `RunAgentInput.tools` 提供的 Agent-scoped browser Tools
@@ -103,9 +104,10 @@ lease.dispose()
 
 | 字段 | 默认值 | 用途 |
 | --- | --- | --- |
-| `path` | `/ag-ui` | 精确 Host HTTP route |
+| `path` | `/ag-ui` | Run 与 file 使用的 Host HTTP route base |
 | `provider` | 必填 | 已注册 DSH model provider route |
 | `model` | 必填 | Provider 持有的 model ID |
+| `workspaceRoot` | `<DSH_HOME>/workspaces` | 按 durable session id 命名的 thread workspace 目录根路径 |
 | `agentPreset` | 无 | 组合进每个线程的部署级默认 agent preset id |
 | `tenantPresets` | `{}` | 按租户覆盖 `agentPreset` 的 preset id 映射 |
 | `sharedSecret` | 必填 | 仅与可信 BFF 共享的 bearer secret |
@@ -113,9 +115,11 @@ lease.dispose()
 | `userHeader` | `x-dsh-user-id` | 可信 user identity header |
 | `allowNonLoopback` | `false` | 显式允许非 loopback Host bind |
 | `maxRequestBytes` | `262144` | 最大 request body bytes |
+| `maxFileBytes` | `104857600` | 每个上传文件的最大 bytes |
 | `maxIdentityBytes` | `256` | 每个 protocol 或 identity ID 的最大 bytes |
 | `maxMessages` | `256` | 每次 request 的最大 message 数量 |
 | `maxMessageBytes` | `524288` | Message JSON 最大总 bytes |
+| `maxFilesPerMessage` | `8` | 每条 user message 的最大非文本 part 数量 |
 | `maxContexts` | `32` | 最大 context entry 数量 |
 | `maxContextBytes` | `131072` | Context JSON 最大总 bytes |
 | `maxTools` | `32` | 最大 browser Tool 数量 |
@@ -131,6 +135,12 @@ lease.dispose()
 | `maxRunsPerThread` | `32` | 每个 thread 保留的 run ledger entries 上限，同时也分别限制等待请求的数量 |
 
 `agentPreset` 让每个线程的 agent 从宿主的 agent-presets roster 组合而来（需在本 Gateway 之前挂载 roster 插件）；无法解析的 id 会让 Gateway 激活响亮失败，按租户条目覆盖该租户线程的部署默认值，而恢复的线程保持其持久 session 自己记录的组合。不配置 `agentPreset` 时，线程保持宿主组合不变。
+
+每个新 thread 使用 `<workspaceRoot>/<sessionId>` 作为 DSH session working directory，并创建 `uploads` 子目录。目录按 durable session id 命名，客户端 thread id 不会落盘。Gateway 激活时会展开相对路径和 `~` 路径。Host 提供 `workspaceRegistry` 时，新 workspace 也会注册到 DSH Web。
+
+可信 BFF 可以在 run 前把文件流式写入该目录。`POST <path>/threads/<threadId>/files` 接收 raw body、`content-length`、可选的 `content-type`，以及 `x-file-name` 中 percent-encoded UTF-8 文件名。`GET <path>/threads/<threadId>/files/<name>` 从已有的认证 thread binding 下载文件。两个 route 与 run route 使用相同的 bearer secret 和 identity headers。
+
+User message 支持有序的 AG-UI content parts。Text part 保持为文本。URL part 必须引用当前 thread `uploads` 目录中的 `<prefix>/threads/<threadId>/files/<encodeURIComponent(name)>`。Host 提供 attachment storage 时，图片会成为原生 DSH image block；其他上传文件会成为 `Attached file: uploads/<name> (...)` 文本，Agent 可从 workspace 打开它们。不接受 inline data part；请先把文件上传到 thread，再通过 URL 引用。`MESSAGES_SNAPSHOT` 返回的 user message 与客户端发送的 parts 完全一致，因此回传 snapshot 的客户端保持相同的 message digest。
 
 `maxRunEvents` 必须至少容纳 mandatory opening 与 terminal events。`maxRunEventBytes` 会限制包含 `RUN_STARTED` 和 terminal event 在内的完整 retained Run record，并且必须足以容纳已配置的最大 identity length。非 loopback DSH WebServer 需要设置 `allowNonLoopback: true`。推荐把 Gateway 保持在 loopback，并放在同 Host 的 authenticated BFF 后面。
 
@@ -312,7 +322,7 @@ Upstream Dojo 的 integration registry 是静态源码，目前没有 `deepseek-
 ## HTTP 与 run 语义
 
 - Request 必须为 `POST application/json`，并且符合 AG-UI `RunAgentInput`。
-- 普通 run 接受一条或多条新的文本 user message，它们按到达顺序进入同一个 DSH turn。没有新消息的 run 只返回历史 snapshot，不会在活跃 run 后面等待。
+- 普通 run 接受一条或多条包含 text 或受支持 multimodal content parts 的新 user message，它们按到达顺序进入同一个 DSH turn。没有新消息的 run 只返回历史 snapshot。
 - Continuation 接受属于一个 pending DSH turn 的一条或多条新 frontend ToolMessages。
 - 官方 A2UI user-action run 接受经过校验的 `a2uiAction` envelope 与匹配的 synthetic `log_a2ui_event` pair；它也可以同时携带客户端自有 pending `render_a2ui` 调用的 result。
 - middleware 在 `forwardedProps.injectA2UITool` 中标记的 render Tool 会在其 run 内以 `{"status":"rendered"}` 结算，从不 park。

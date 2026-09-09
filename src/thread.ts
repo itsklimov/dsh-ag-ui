@@ -1,6 +1,9 @@
 import type { Context } from '@deepseek-ai/cordis'
+import { mkdir, realpath } from 'node:fs/promises'
+import { join } from 'node:path'
 import {
   EventType,
+  type InputContent,
   type Message as AgUiMessage,
   type RunAgentInput,
   type Tool as AgUiTool,
@@ -8,6 +11,13 @@ import {
   type UserMessage as AgUiUserMessage,
 } from '@ag-ui/core'
 import type { Agent, AgentHandle, AgentSetup } from '@deepseek-ai/dsh-agent'
+import type {
+  AdmittedPromptContentPart,
+  AttachmentStore,
+  ImageMediaType,
+  AttachmentAdmissionPart,
+  FileAttachmentRef,
+} from '@deepseek-ai/dsh-attachment'
 import { createUserMessage, errorChain, freezeMessage, MessageId, ToolCallId, type UserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { SessionPersistenceNotFoundError } from '@deepseek-ai/dsh-session-persistence'
@@ -20,6 +30,8 @@ import {
 } from '@deepseek-ai/dsh-tools'
 import { isJsonValue, type JsonValue } from '@deepseek-ai/dsh-util-values'
 import { isDeepStrictEqual } from 'node:util'
+import type { FileUploads, FileUploadReceiptId, FileUploadValue } from '@deepseek-ai/dsh-client-file-upload'
+import { signedFileUrl, verifiedFileUrl } from './files.ts'
 import { AgUiGatewayError } from './errors.ts'
 import { jsonBytes, valueDigest } from './json.ts'
 import { durableUserId, SessionProjection, STATE_TOOL_NAME } from './projection.ts'
@@ -41,6 +53,7 @@ const A2UI_RENDER_TOOL_NAME = 'render_a2ui'
 /** The result the middleware would synthesize for a render call; the Gateway returns it inside the run instead. */
 const A2UI_RENDERED_RESULT = JSON.stringify({ status: 'rendered' })
 const FRONTEND_TOOL_NAME = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/
+const IMAGE_MEDIA_TYPES = new Set<string>(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
 
 /** Fixed identity for registry scheduling probes that never dispatch. */
 const SCHEDULING_PROBE = {
@@ -53,6 +66,8 @@ const SCHEDULING_PROBE = {
 export interface ThreadOptions {
   readonly provider: string
   readonly model: string
+  /** Absolute root containing the deterministic thread workspace. */
+  readonly workspaceRoot: string
   /** Preset id composed into the thread's agents; absent keeps the host composition. */
   readonly presetId?: string
   readonly frontendToolTimeoutMs: number
@@ -61,10 +76,9 @@ export interface ThreadOptions {
   readonly maxRunEventBytes: number
   readonly maxRunsPerThread: number
   readonly maxStateBytes: number
+  readonly maxFilesPerMessage: number
+  readonly fileSecret?: string
 }
-
-/** A new user message the V1 wire contract admits: text only. */
-type TextUserMessage = AgUiUserMessage & { content: string }
 
 interface AcceptedMessage {
   readonly role: 'user' | 'tool'
@@ -112,12 +126,22 @@ interface SharedStateBaseline {
   readonly value: unknown
 }
 
+/** Canonical paths owned by one thread binding. */
+export interface ThreadWorkspace {
+  readonly cwd: string
+}
+
+interface WorkspaceRegistryLike {
+  create(path: string, title?: string): Promise<unknown>
+}
+
 /** One authenticated process-local AG-UI thread and its owned DSH Agent. */
 export class ThreadBinding {
   /** Deterministic durable DSH session identity, derived from the authenticated thread tuple. */
   readonly sessionId: SessionId
   /** Authenticated principal and client thread tuple owning this binding. */
   readonly identity: AgUiThreadIdentity
+  private workspaceValue: ThreadWorkspace | undefined
   /** Pure session-event to wire-event translation owned by this thread. */
   private readonly projection: SessionProjection
   /** Presenter seam: definitions resolve in the owning Agent's scope; client Tools present themselves. */
@@ -136,6 +160,7 @@ export class ThreadBinding {
   private activeRun: RunController | undefined
   private waitingRuns = 0
   private idleTimer: ReturnType<typeof setTimeout> | undefined
+  private activeFileOperations = 0
   private readonly acceptedMessages = new Map<string, AcceptedMessage>()
   private readonly frontendTools = new Map<string, FrontendToolRegistration>()
   private stagedTools: AgUiTool[] | undefined
@@ -171,19 +196,62 @@ export class ThreadBinding {
 
   private async restoreOrCreate(): Promise<AgentHandle> {
     const agentOptions = { provider: this.options.provider, model: this.options.model }
-    // the resolved preset is snapshotted into durable meta at creation, before any await
-    const meta = this.options.presetId === undefined ? {} : { meta: { agentPreset: this.options.presetId } }
-    const create = () => this.ctx.agents.create({ sessionId: this.sessionId, ...meta, agentOptions, setup: this.agentSetup() })
+    const create = () => this.create(agentOptions)
     if (this.ctx.get('sessionPersistence') === undefined) return create()
     try {
       const handle = await this.ctx.agents.resume({ resumeSessionId: this.sessionId, agentOptions, setup: this.agentSetup() })
-      this.recover(handle.agent.session.snapshotEvents())
-      return handle
+      try {
+        const recordedCwd = handle.agent.session.header.cwd
+        if (recordedCwd === undefined) {
+          this.ctx.logger.warn(`ag-ui: resumed legacy session ${String(this.sessionId)} without a workspace cwd`)
+        } else {
+          const workspace = await this.prepareWorkspace()
+          if (recordedCwd !== workspace.cwd) {
+            throw new AgUiGatewayError(
+              'SESSION_CWD_MISMATCH',
+              'The persisted session workspace does not match the configured thread workspace.',
+              409,
+            )
+          }
+          this.workspaceValue = workspace
+        }
+        this.recover(handle.agent.session.snapshotEvents())
+        return handle
+      } catch (error) {
+        await handle.dispose()
+        throw error
+      }
     } catch (error) {
       // A missing log permits creation; corruption, format refusal, and setup failures do not.
       if (!(error instanceof SessionPersistenceNotFoundError)) throw error
       return create()
     }
+  }
+
+  private async create(agentOptions: { provider: string; model: string }): Promise<AgentHandle> {
+    const workspace = await this.prepareWorkspace()
+    const registry = workspaceRegistryOf(this.ctx)
+    if (registry !== undefined) await registry.create(workspace.cwd, String(this.sessionId))
+    const meta = {
+      cwd: workspace.cwd,
+      ...(this.options.presetId === undefined ? {} : { agentPreset: this.options.presetId }),
+    }
+    const handle = await this.ctx.agents.create({
+      sessionId: this.sessionId,
+      meta,
+      agentOptions,
+      setup: this.agentSetup(),
+    })
+    this.workspaceValue = workspace
+    return handle
+  }
+
+  private async prepareWorkspace(): Promise<ThreadWorkspace> {
+    // named by the durable session id so the client thread id stays off disk
+    const directory = join(this.options.workspaceRoot, String(this.sessionId))
+    await mkdir(directory, { recursive: true })
+    const cwd = await realpath(directory)
+    return { cwd }
   }
 
   private agentSetup(): AgentSetup {
@@ -241,6 +309,11 @@ export class ThreadBinding {
       throw new AgUiGatewayError('AGENT_NOT_AVAILABLE', 'The AG-UI thread Agent is unavailable.', 410)
     }
     return this.agent
+  }
+
+  /** Canonical workspace paths, or undefined when a legacy session recorded no cwd. */
+  get workspace(): ThreadWorkspace | undefined {
+    return this.workspaceValue
   }
 
   /**
@@ -371,7 +444,11 @@ export class ThreadBinding {
       this.a2uiRenderTool = a2uiRenderToolName(props)
       if (admission.kind === 'user') {
         this.assertUserRunReady()
-        this.commitUserMessages(controller, admission.messages)
+        const text = admission.messages.flatMap(message => typeof message.content === 'string'
+          ? [{ message, content: [{ type: 'text' as const, text: message.content }] }]
+          : [])
+        if (text.length === admission.messages.length) this.commitUserMessages(controller, text)
+        else void this.driveContentParts(controller, admission.messages)
         return
       }
 
@@ -443,9 +520,29 @@ export class ThreadBinding {
     for (const view of this.projection.toolViewEvents(events)) controller.emit(view)
   }
 
+  private async driveContentParts(controller: RunController, messages: readonly AgUiUserMessage[]): Promise<void> {
+    try {
+      const admitted = []
+      for (const message of messages) {
+        const receipts: FileUploadReceiptId[] = []
+        const content = await this.admitUserContent(typeof message.content === 'string'
+          ? [{ type: 'text', text: message.content }]
+          : message.content as InputContent[], receipts)
+        admitted.push({ message, content, receipts })
+      }
+      if (controller.record.state !== 'active') return
+      this.commitUserMessages(controller, admitted)
+    } catch (error) {
+      this.failRunAdmission(controller, error)
+    }
+  }
+
   /** Queue every admitted user message into one DSH turn, in arrival order. */
-  private commitUserMessages(controller: RunController, admitted: readonly TextUserMessage[]): void {
-    this.emitHistory(controller, admitted)
+  private commitUserMessages(
+    controller: RunController,
+    admitted: ReadonlyArray<{ message: AgUiUserMessage, content: AdmittedPromptContentPart[], receipts?: FileUploadReceiptId[] }>,
+  ): void {
+    this.emitHistory(controller, admitted.map(item => item.message))
     // a snapshot that overflowed the run budget already settled the run
     if (controller.record.state !== 'active') return
     const baseline = this.prepareSharedState(controller.input)
@@ -453,13 +550,16 @@ export class ThreadBinding {
     this.applyFrontendTools(controller.input.tools)
     this.injectContext(controller.input, baseline)
     this.commitSharedStateBaseline(baseline)
-    const durable = admitted.map((admission) => {
-      // the client's message id is preserved as the durable id, so a cold resume recovers the mapping
-      const message = freezeMessage({
+    const durable = admitted.map(({ message: admission, content }) => {
+      // the client's id and exact content parts are preserved, so the snapshot and a cold resume return what was accepted
+      const source = typeof admission.content === 'string'
+        ? { kind: 'user' as const, rpcId: durableUserId(admission.id) }
+        : { kind: 'user' as const, rpcId: durableUserId(admission.id), agUiContent: admission.content }
+      const message: UserMessage = freezeMessage({
         id: MessageId(durableUserId(admission.id)),
         role: 'user',
-        content: [{ type: 'text', text: admission.content }],
-        source: { kind: 'user' },
+        content,
+        source,
       })
       this.acceptedMessages.set(admission.id, { role: 'user', digest: messageDigest(admission.id, admission.content) })
       this.userMessageIds.set(String(message.id), admission.id)
@@ -469,9 +569,107 @@ export class ThreadBinding {
     // earlier messages park at the step boundary and the last one wakes the driver
     durable.forEach((message, index) => {
       controller.messageId = String(message.id)
+      const receipts = admitted[index]!.receipts ?? []
+      using binding = receipts.length === 0 ? undefined : this.fileUploads.bindPrompt(this.liveAgent, receipts, String(message.id))
       if (index < durable.length - 1) this.liveAgent.send(message, 'next-step', false)
       else this.liveAgent.followup(message)
+      binding?.commit()
     })
+  }
+
+  private async admitUserContent(content: InputContent[], receipts: FileUploadReceiptId[]): Promise<AdmittedPromptContentPart[]> {
+    if (content.filter(part => part.type !== 'text').length > this.options.maxFilesPerMessage) {
+      throw new AgUiGatewayError('FILE_LIMIT_EXCEEDED', 'The user message contains too many non-text content parts.', 413)
+    }
+    const prompt: AttachmentAdmissionPart[] = []
+    for (const part of content) {
+      if (part.type === 'text') {
+        prompt.push({ type: 'text', text: part.text })
+      } else if (part.type === 'binary' || part.source.type !== 'url') {
+        // only references round-trip through MESSAGES_SNAPSHOT unchanged; inline bytes belong in a thread file
+        throw new AgUiGatewayError('UNSUPPORTED_CONTENT_PART', 'Only text parts and thread file URLs are accepted; upload the file to the thread first.')
+      } else {
+        prompt.push(await this.admitFilePart(part, receipts))
+      }
+    }
+    if (prompt.every(part => part.type === 'text')) return prompt
+    const attachments = this.attachments
+    const attachment = await import('@deepseek-ai/dsh-attachment')
+    try {
+      return await attachments.admitPromptContent(prompt)
+    } catch (error) {
+      if (error instanceof attachment.AttachmentError) {
+        throw new AgUiGatewayError(error.code, error.message, 400, error)
+      }
+      throw error
+    }
+  }
+
+  /** Official service, optional for hosts that only accept text. */
+  private get fileUploads(): FileUploads {
+    const uploads = this.ctx.get('fileUploads')
+    if (uploads === undefined) throw new AgUiGatewayError('FILES_UNSUPPORTED', 'This Host does not provide native file uploads.', 409)
+    return uploads
+  }
+
+  private get attachments(): AttachmentStore {
+    const attachments = this.ctx.get('attachments')
+    if (attachments === undefined) throw new AgUiGatewayError('FILES_UNSUPPORTED', 'This Host does not provide attachment storage.', 409)
+    return attachments
+  }
+
+  async uploadFile(data: AsyncIterable<Uint8Array>, name: string, signal?: AbortSignal): Promise<FileUploadValue> {
+    const uploads = this.fileUploads
+    using _activity = this.holdFileActivity()
+    return await uploads.uploadStream({ sessionId: this.sessionId, data, name, ...(signal === undefined ? {} : { signal }) })
+  }
+
+  fileUrl(path: string, upload: FileUploadValue): string {
+    if (this.options.fileSecret === undefined) throw new Error('ag-ui: file URL signing is not configured')
+    return signedFileUrl(path, this.identity.threadId, String(this.sessionId), this.options.fileSecret, upload)
+  }
+
+  fileFromUrl(value: string): FileUploadValue {
+    if (this.options.fileSecret === undefined) throw new AgUiGatewayError('FILE_NOT_FOUND', 'The requested file was not found.', 404)
+    return verifiedFileUrl(value, this.identity.threadId, String(this.sessionId), this.options.fileSecret)
+  }
+
+  async *readFile(file: FileAttachmentRef): AsyncIterable<Uint8Array> {
+    const attachments = this.attachments
+    using _activity = this.holdFileActivity()
+    yield* attachments.readFileStream(file)
+  }
+
+  /** Keep the native Session and its receipts alive until every concurrent file operation settles. */
+  private holdFileActivity(): Disposable {
+    this.assertLive()
+    this.activeFileOperations += 1
+    this.clearIdleExpiry()
+    return {
+      [Symbol.dispose]: () => {
+        this.activeFileOperations -= 1
+        this.scheduleIdleExpiry()
+      },
+    }
+  }
+
+  private async admitFilePart(part: Exclude<InputContent, { type: 'text' | 'binary' }>, receipts: FileUploadReceiptId[]): Promise<AttachmentAdmissionPart> {
+    const upload = this.fileFromUrl(part.source.value)
+    if (this.fileUploads.resolve(this.liveAgent, upload.receiptId) === undefined) {
+      throw new AgUiGatewayError('FILE_NOT_STAGED', 'Upload the file again before attaching it to a new prompt.', 400)
+    }
+    receipts.push(upload.receiptId)
+    const mediaType = part.source.mimeType ?? 'application/octet-stream'
+    if (part.type === 'image' || isImageMediaType(mediaType)) {
+      if (!isImageMediaType(mediaType)) throw new AgUiGatewayError('UNSUPPORTED_MEDIA_TYPE', 'The image media type is not supported.')
+      if (upload.file.bytes > this.attachments.imageLimits.maxImageBytes) {
+        throw new AgUiGatewayError('ATTACHMENT_TOO_LARGE', 'The image exceeds its byte limit.', 413)
+      }
+      const chunks: Uint8Array[] = []
+      for await (const chunk of this.readFile(upload.file)) chunks.push(chunk)
+      return { type: 'image', mediaType, data: Buffer.concat(chunks).toString('base64'), name: upload.file.name }
+    }
+    return { type: 'file', attachment: upload.file }
   }
 
   private failRunAdmission(controller: RunController, error: unknown): void {
@@ -536,11 +734,11 @@ export class ThreadBinding {
   /** Sort a run's new messages: user messages open a turn, Tool results continue one, none at all only synchronizes history. */
   private classifyMessages(input: RunAgentInput):
     | { kind: 'sync' }
-    | { kind: 'user'; messages: TextUserMessage[] }
+    | { kind: 'user'; messages: AgUiUserMessage[] }
     | { kind: 'action'; action: A2UIActionContinuation }
     | { kind: 'tools'; messages: AgUiToolMessage[]; action?: A2UIActionContinuation } {
     const action = a2uiActionContinuation(input)
-    const users: TextUserMessage[] = []
+    const users: AgUiUserMessage[] = []
     const tools: AgUiToolMessage[] = []
     for (const message of input.messages) {
       if (message.role !== 'user' && message.role !== 'tool') continue
@@ -561,10 +759,7 @@ export class ThreadBinding {
           throw new AgUiGatewayError('UNKNOWN_TOOL_RESULT', 'The Tool result has no pending or completed server call.', 409)
         }
       } else {
-        if (typeof message.content !== 'string') {
-          throw new AgUiGatewayError('UNSUPPORTED_MESSAGE_CONTENT', 'V1 accepts text user messages only.')
-        }
-        users.push(message as TextUserMessage)
+        users.push(message)
       }
     }
     if (users.length > 0 && tools.length > 0) {
@@ -955,7 +1150,7 @@ export class ThreadBinding {
 
   private scheduleIdleExpiry(): void {
     this.clearIdleExpiry()
-    if (this.disposed || this.pendingCalls.size !== 0 || this.activeRun !== undefined) return
+    if (this.disposed || this.activeFileOperations !== 0 || this.pendingCalls.size !== 0 || this.activeRun !== undefined) return
     this.idleTimer = setTimeout(() => { this.onExpired(this) }, this.options.threadIdleMs)
   }
 }
@@ -967,8 +1162,18 @@ function isEmptyStateContainer(value: unknown): boolean {
 }
 
 /** Digest one accepted user message in a fixed field order, stable across cold resume. */
-function messageDigest(clientId: string, content: string): string {
+function messageDigest(clientId: string, content: AgUiUserMessage['content']): string {
   return valueDigest({ id: clientId, role: 'user', content })
+}
+
+/** Narrow the four image formats accepted by prompt attachment admission. */
+function isImageMediaType(value: string): value is ImageMediaType {
+  return IMAGE_MEDIA_TYPES.has(value)
+}
+
+/** Resolve the optional host workspace registry without requiring the package. */
+function workspaceRegistryOf(ctx: Context): WorkspaceRegistryLike | undefined {
+  return (ctx as Context & { get(name: string): unknown }).get('workspaceRegistry') as WorkspaceRegistryLike | undefined
 }
 
 /** Narrow a JSON object without accepting arrays or null. */

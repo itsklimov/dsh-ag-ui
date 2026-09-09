@@ -5,13 +5,16 @@
 
 import { timingSafeEqual } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { resolve } from 'node:path'
 import { EventType, RunAgentInputSchema, type RunAgentInput } from '@ag-ui/core'
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { dshHomePath, expandHomePath } from '@deepseek-ai/dsh-home-paths'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-tools'
 import { AgUiGatewayError, publicError } from './errors.ts'
+import { createFileRoute, verifiedFileUrl } from './files.ts'
 import { jsonBytes, jsonDepth, requestDigest, utf8Bytes } from './json.ts'
 import { agentPresetsOf } from './presets.ts'
 import { replayRun } from './run.ts'
@@ -29,12 +32,14 @@ const IDENTITY = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/
 
 /** AG-UI HTTP, identity, lifecycle, and resource limits. */
 export interface Config {
-  /** Exact HTTP route. */
+  /** Base HTTP route for runs and thread files. */
   path?: string
   /** Provider route for Gateway-created Agents. */
   provider: string
   /** Model id for Gateway-created Agents. */
   model: string
+  /** Root directory containing one workspace per thread. */
+  workspaceRoot?: string
   /** Deployment-default preset id composed into every thread without a tenant override. */
   agentPreset?: string
   /** Per-tenant preset ids taking precedence over {@link Config.agentPreset}. */
@@ -49,12 +54,16 @@ export interface Config {
   allowNonLoopback?: boolean
   /** Maximum request body bytes. */
   maxRequestBytes?: number
+  /** Maximum raw bytes in one uploaded file. */
+  maxFileBytes?: number
   /** Maximum bytes in each identity or AG-UI id. */
   maxIdentityBytes?: number
   /** Maximum messages retained in one AG-UI request. */
   maxMessages?: number
   /** Maximum combined message JSON bytes. */
   maxMessageBytes?: number
+  /** Maximum non-text content parts in one user message. */
+  maxFilesPerMessage?: number
   /** Maximum context entries in one run. */
   maxContexts?: number
   /** Maximum combined context JSON bytes. */
@@ -88,6 +97,7 @@ export const Config: z<Config> = z.object({
   path: z.string().default('/ag-ui'),
   provider: z.string().required(),
   model: z.string().required(),
+  workspaceRoot: z.string().default(dshHomePath('workspaces')),
   agentPreset: z.string(),
   tenantPresets: z.dict(z.string()),
   sharedSecret: z.string().required(),
@@ -95,9 +105,11 @@ export const Config: z<Config> = z.object({
   userHeader: z.string().default('x-dsh-user-id'),
   allowNonLoopback: z.boolean().default(false),
   maxRequestBytes: z.natural().default(256 * 1024),
+  maxFileBytes: z.natural().default(100 * 1024 * 1024),
   maxIdentityBytes: z.natural().default(256),
   maxMessages: z.natural().default(256),
   maxMessageBytes: z.natural().default(512 * 1024),
+  maxFilesPerMessage: z.natural().default(8),
   maxContexts: z.natural().default(32),
   maxContextBytes: z.natural().default(128 * 1024),
   maxTools: z.natural().default(32),
@@ -140,16 +152,36 @@ export class AgUiGateway extends Service implements AgUiAgentLookup {
    */
   constructor(ctx: Context, config: Config) {
     super(ctx, 'agUi')
-    this.resolved = config as Required<Config>
+    this.resolved = {
+      ...config,
+      workspaceRoot: resolveWorkspaceRoot(config.workspaceRoot as string),
+    } as Required<Config>
     assertConfig(ctx, this.resolved)
+    const fileRoute = createFileRoute({
+      path: this.resolved.path,
+      maxFileBytes: this.resolved.maxFileBytes,
+      authenticate: request => this.authenticate(request),
+      validateThreadId: threadId => validateIdentity(threadId, 'thread', this.resolved.maxIdentityBytes),
+      verifyFileUrl: (principal, threadId, value) => verifiedFileUrl(
+        value, threadId, String(durableSessionId(principal, threadId, this.resolved.sharedSecret)), this.resolved.sharedSecret,
+      ),
+      bindingFor: (principal, threadId) => this.bindingFor(principal, threadId),
+      respondError: (response, error) => this.respondError(response, error),
+    })
     ctx.effect(() => {
-      const unregister = ctx.webServer.register({
+      const unregisterRun = ctx.webServer.register({
         kind: 'exact',
         path: this.resolved.path,
         handler: (request, response) => this.handle(request, response),
       })
+      const unregisterFiles = ctx.webServer.register({
+        kind: 'prefix',
+        path: `${this.resolved.path}/threads`,
+        handler: fileRoute,
+      })
       return async () => {
-        unregister()
+        unregisterFiles()
+        unregisterRun()
         await this.disposeAll()
       }
     }, 'ag-ui.routeAndThreads')
@@ -283,6 +315,7 @@ export class AgUiGateway extends Service implements AgUiAgentLookup {
     const options: ThreadOptions = {
       provider: this.resolved.provider,
       model: this.resolved.model,
+      workspaceRoot: this.resolved.workspaceRoot,
       ...(presetId === undefined ? {} : { presetId }),
       frontendToolTimeoutMs: this.resolved.frontendToolTimeoutMs,
       threadIdleMs: this.resolved.threadIdleMs,
@@ -290,6 +323,8 @@ export class AgUiGateway extends Service implements AgUiAgentLookup {
       maxRunEventBytes: this.resolved.maxRunEventBytes,
       maxRunsPerThread: this.resolved.maxRunsPerThread,
       maxStateBytes: this.resolved.maxStateBytes,
+      maxFilesPerMessage: this.resolved.maxFilesPerMessage,
+      fileSecret: this.resolved.sharedSecret,
     }
     const binding = new ThreadBinding(this.ctx, principal, threadId, durableSessionId(principal, threadId, this.resolved.sharedSecret), options, (expired) => {
       /* v8 ignore next -- one binding instance owns its idle timer; stale callbacks are contained defensively. */
@@ -337,6 +372,12 @@ export class AgUiGateway extends Service implements AgUiAgentLookup {
     }
     await Promise.allSettled(bindings.map(binding => binding.dispose()))
   }
+}
+
+/** Expand and absolutize the configured workspace root. */
+function resolveWorkspaceRoot(value: string): string {
+  if (value.trim() === '') throw new Error('ag-ui: workspaceRoot must not be empty')
+  return resolve(expandHomePath(value))
 }
 
 /** Reject invalid configuration before registering the HTTP route. */
