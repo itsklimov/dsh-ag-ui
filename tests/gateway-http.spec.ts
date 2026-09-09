@@ -302,7 +302,7 @@ describe('AG-UI gateway lifecycle', () => {
     const waiting = postStreaming(url, secondRun())
     await vi.waitFor(() => { expect(debug).toHaveBeenCalledWith(expect.stringContaining('run-2 waits for the active run')) })
     let overflow: { status: number; body: string } | undefined
-    const rejected = post(url, input({ runId: 'overflow' })).then(result => { overflow = result })
+    const rejected = post(url, input({ runId: 'overflow', messages: [{ id: 'overflow-user', role: 'user', content: 'overflow' }] })).then(result => { overflow = result })
     try {
       await vi.waitFor(() => { expect(overflow).toBeDefined() })
       expectCode(overflow!, 429, 'RUN_QUEUE_FULL')

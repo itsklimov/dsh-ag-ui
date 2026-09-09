@@ -289,6 +289,11 @@ export class SessionProjection {
     if (lifecycle?.kind === 'state') this.toolCallLifecycles.set(callId, { ...lifecycle, commit })
   }
 
+  /** Test a recorded backend result without changing admission bookkeeping. */
+  hasServerResult(callId: string): boolean {
+    return this.serverResultCallIds.has(callId)
+  }
+
   /** Consume one recorded backend result id so a re-sent ToolMessage is accepted. */
   consumeServerResult(callId: string): boolean {
     return this.serverResultCallIds.delete(callId)

@@ -305,12 +305,12 @@ Upstream Dojo 的 integration registry 是静态源码，目前没有 `deepseek-
 ## HTTP 与 run 语义
 
 - Request 必须为 `POST application/json`，并且符合 AG-UI `RunAgentInput`。
-- 普通 run 接受一条或多条新的文本 user message，它们按到达顺序进入同一个 DSH turn。没有新消息的 run 只返回历史 snapshot，不会在活跃 run 后面等待。
+- 普通 run 接受一条或多条新的文本 user message，它们按到达顺序进入同一个 DSH turn。没有新消息的 run（包括重发完整已接纳 transcript）只返回历史 snapshot，不会在活跃 run 后面等待。
 - Continuation 接受属于一个 pending DSH turn 的一条或多条新 frontend ToolMessages。
 - 一个 DSH turn 可以跨多个 AG-UI HTTP runs。
 - 每个 run 发出一个 `RUN_STARTED` 和恰好一个 `RUN_FINISHED` 或 `RUN_ERROR`。
-- `runId` 是 exact-request idempotency key。已完成的相同 request 会重放 retained events，不再次驱动 DSH。
-- 每个 thread 最多允许 `maxRunsPerThread` 个请求排队等待，超出时返回 `429 RUN_QUEUE_FULL`。等待客户端断开连接会释放队列位置。一起排队的相同请求会重放同一份保留结果，不会重复驱动 DSH。
+- `runId` 是 exact-request idempotency key。已完成的相同 request（包括只读历史 run）会重放 retained events，不再次驱动 DSH。所有 run 共用有界 ledger；活跃记录不会被淘汰，ledger 已满时以 `429 RUN_LEDGER_FULL` 拒绝 admission。
+- 每个 thread 最多允许 `maxRunsPerThread` 个请求排队等待，超出时返回 `429 RUN_QUEUE_FULL`。等待客户端断开连接会释放队列位置。排队请求在被接纳或断开连接前阻止 thread 空闲过期，包括等待已取消的原生 turn 收敛期间。一起排队的相同请求会重放同一份保留结果，不会重复驱动 DSH。
 - 一个 thread 同时只驱动一个 HTTP run。在另一个 run 活跃时到达的 run 会等待它以及 Agent turn 结束，因此同一 thread 的 runs 按到达顺序执行；等待中断开连接的客户端不会被接纳。
 - Active shared-state run 会在 model events 前发送 synchronization snapshot。
 - 一个 DSH step 可挂起多个 frontend Tool call；续跑可只回答其中一部分。

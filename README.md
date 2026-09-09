@@ -305,12 +305,12 @@ The separate [`dsh-ag-ui-adapter`](packages/dsh-ag-ui-adapter) package is the em
 ## HTTP and run semantics
 
 - Requests must be `POST application/json` and match AG-UI `RunAgentInput`.
-- A normal run accepts one or more new text user messages; they join one DSH turn in arrival order. A run without new messages only returns the history snapshot; it never waits behind an active run.
+- A normal run accepts one or more new text user messages; they join one DSH turn in arrival order. A run without new messages, including a full already-accepted transcript, only returns the history snapshot; it never waits behind an active run.
 - A continuation accepts one or more new frontend ToolMessages for one pending DSH turn.
 - One DSH turn can cross multiple AG-UI HTTP runs.
 - Each run emits one `RUN_STARTED` and exactly one `RUN_FINISHED` or `RUN_ERROR`.
-- `runId` is an exact-request idempotency key. Completed identical requests replay retained events without driving DSH again.
-- One thread drives one HTTP run at a time. A run that arrives while another is active waits for it and for the Agent turn to settle, so the runs of one thread are served in arrival order; a waiting client that disconnects is never admitted. Waiting and reservation happen together, so several queued runs all get their turn. At most `maxRunsPerThread` requests may wait per thread; excess requests receive `429 RUN_QUEUE_FULL`, and disconnect frees a queue slot. Identical requests that queued together replay the same retained result.
+- `runId` is an exact-request idempotency key. Completed identical requests, including history-only runs, replay retained events without driving DSH again. All runs share the bounded ledger; active records are never evicted, and a full ledger rejects admission with `429 RUN_LEDGER_FULL`.
+- One thread drives one HTTP run at a time. A run that arrives while another is active waits for it and for the Agent turn to settle, so the runs of one thread are served in arrival order; a waiting client that disconnects is never admitted. Waiting and reservation happen together, so several queued runs all get their turn. At most `maxRunsPerThread` requests may wait per thread; excess requests receive `429 RUN_QUEUE_FULL`, and disconnect frees a queue slot. A waiting request keeps the thread alive until admission or disconnect, including while a cancelled native turn settles. Identical requests that queued together replay the same retained result.
 - An active shared-state run emits its synchronization snapshot before model events.
 - One DSH step can park multiple frontend Tool calls; continuation runs may answer a subset.
 

@@ -13,6 +13,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- History-only runs recognize already-accepted transcripts without waiting for active work and share bounded run-id replay and conflict handling with other runs; queued requests keep their thread alive until admission or disconnect.
+
 - `MESSAGES_SNAPSHOT` now reconstructs assistant Tool calls from durable DSH messages, so Tool-only assistant messages and their results remain correlated after replay.
 - `MESSAGES_SNAPSHOT` now includes the user messages the run just admitted and is emitted only after admission, so a client keeps the message it sent and a rejected run leaves its history untouched.
 

@@ -3,7 +3,7 @@ import { getEventListeners } from 'node:events'
 import { EventType, type RunAgentInput, type Tool } from '@ag-ui/core'
 import { Context } from '@deepseek-ai/cordis'
 import { LlmAttemptId, ToolCallId, createAssistantMessage, createToolResultMessage, type StreamChunk } from '@deepseek-ai/dsh-llm'
-import { ScriptedAdapter, textResponse, toolResponse as scriptedToolResponse } from './scripted-adapter.ts'
+import { type ScriptedResponse, ScriptedAdapter, textResponse, toolResponse as scriptedToolResponse } from './scripted-adapter.ts'
 import { mountTestAgentCore } from './agent-core.ts'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
@@ -43,7 +43,7 @@ function toolResponse(callId: string, args: object): StreamChunk[] {
   return scriptedToolResponse(callId, TOOL.name, args)
 }
 
-async function mount(script: StreamChunk[][] = [textResponse('ok')], overrides: Partial<ThreadOptions> = {}) {
+async function mount(script: ScriptedResponse[] = [textResponse('ok')], overrides: Partial<ThreadOptions> = {}) {
   const ctx = new Context()
   contexts.push(ctx)
   await mountTestAgentCore(ctx)
@@ -89,7 +89,7 @@ interface TestPendingCall {
 interface ThreadBindingInternals {
   activeRun: ReturnType<ThreadBinding['reserveRun']> | undefined
   pendingCalls: Map<string, TestPendingCall>
-  runLedger: Map<string, { digest: string; events: []; state: 'active' | 'completed'; bytes: number }>
+  runLedger: Map<string, ReturnType<ThreadBinding['reserveRun']>>
   projection: { sharedState: unknown }
   sharedStateActive: boolean
   interrupted: boolean
@@ -124,6 +124,150 @@ describe('ThreadBinding run admission', () => {
     await expect(binding.admit(input('aborted', messages), 'aborted', gone.signal)).rejects.toMatchObject({ code: 'CLIENT_DISCONNECTED' })
     expect(binding.getRun('aborted')).toBeUndefined()
     expect(adapter.requests).toHaveLength(0)
+  })
+
+  it('synchronizes a full accepted transcript while another native turn is running', async () => {
+    const gate = Promise.withResolvers<StreamChunk[]>()
+    const { binding, adapter, ctx } = await mount([
+      scriptedToolResponse('server-call', 'backend', {}), textResponse('done'), gate.promise,
+    ])
+    ctx.tools.register(globalTool('backend'))
+    const first = binding.reserveRun(input('first', [{ id: 'known-user', role: 'user', content: 'call backend' }]), 'first')
+    binding.drive(first)
+    await first.done
+    await binding.liveAgent.whenIdle()
+    const snapshot = first.record.events.findLast(event => event.type === EventType.MESSAGES_SNAPSHOT)!
+    const messages = snapshot.messages as RunAgentInput['messages']
+    expect(messages.some(message => message.role === 'tool')).toBe(true)
+    // Rejecting a later message must not consume the earlier server-result echo.
+    await expect(binding.admit(input('invalid', [
+      ...messages, { id: 'invalid-user', role: 'user', content: [{ type: 'text', text: 'unsupported' }] },
+    ]), 'invalid', new AbortController().signal)).rejects.toMatchObject({ code: 'UNSUPPORTED_MESSAGE_CONTENT' })
+    const active = binding.reserveRun(input('active', [{ id: 'next-user', role: 'user', content: 'wait' }]), 'active')
+    binding.drive(active)
+    await vi.waitFor(() => expect(adapter.requests).toHaveLength(3))
+    const read = binding.admit(input('read', messages), 'read', new AbortController().signal)
+    let admitted = false
+    void read.then(() => { admitted = true })
+    await Promise.resolve()
+    try {
+      expect(admitted).toBe(true)
+      const controller = await read
+      if ('replay' in controller) throw new Error('Expected history admission')
+      binding.drive(controller)
+      expect(controller.record.events.at(-1)?.type).toBe(EventType.RUN_FINISHED)
+      expect(active.record.state).toBe('active')
+      expect(binding.liveAgent.status).toBe('running')
+    } finally {
+      gate.resolve(textResponse('finished'))
+      await active.done
+    }
+  })
+
+  it('retains history runs for identical replay, conflicts, and concurrent duplicate admission', async () => {
+    const { binding } = await mount()
+    const request = input('history', [])
+    const [first, duplicate] = await Promise.all([
+      binding.admit(request, 'history', new AbortController().signal),
+      binding.admit(request, 'history', new AbortController().signal),
+    ])
+    if ('replay' in first) throw new Error('Expected history admission')
+    expect(duplicate).toEqual({ replay: first.record })
+    binding.drive(first)
+    const retained = structuredClone(first.record.events)
+    expect(() => binding.drive(first)).toThrow('lost its reservation')
+    expect(first.record.events).toEqual(retained)
+    const work = binding.reserveRun(input('work', [{ id: 'user', role: 'user', content: 'hello' }]), 'work')
+    binding.drive(work)
+    await work.done
+    expect(await binding.admit(request, 'history', new AbortController().signal)).toEqual({ replay: first.record })
+    expect(first.record.events).toEqual(retained)
+    await expect(binding.admit(request, 'different', new AbortController().signal)).rejects.toMatchObject({ code: 'RUN_ID_CONFLICT' })
+  })
+
+  it('reclaims completed history records without evicting active history or work', async () => {
+    const { binding } = await mount([], { maxRunsPerThread: 3 })
+    const active = binding.reserveRun(input('active', [{ id: 'user', role: 'user', content: 'hello' }]), 'active')
+    const first = await binding.admit(input('first-history', []), 'first', new AbortController().signal)
+    const second = await binding.admit(input('second-history', []), 'second', new AbortController().signal)
+    if ('replay' in first || 'replay' in second) throw new Error('Expected history admission')
+    binding.drive(first)
+    const third = await binding.admit(input('third-history', []), 'third', new AbortController().signal)
+    if ('replay' in third) throw new Error('Expected history admission')
+    expect(binding.getRun('first-history')).toBeUndefined()
+    expect(binding.getRun('active')).toBe(active.record)
+    expect(binding.getRun('second-history')).toBe(second.record)
+    await expect(binding.admit(input('full', []), 'full', new AbortController().signal)).rejects.toMatchObject({ code: 'RUN_LEDGER_FULL' })
+    expect(active.record.state).toBe('active')
+    await binding.dispose()
+    await Promise.all([active.done, second.done, third.done])
+    expect(second.record.events.at(-1)).toMatchObject({ code: 'AGENT_NOT_AVAILABLE' })
+    expect(third.record.events.at(-1)).toMatchObject({ code: 'AGENT_NOT_AVAILABLE' })
+  })
+
+  it('settles disconnected history independently and releases unopened run IDs for retry', async () => {
+    const { binding } = await mount([toolResponse('pending', { value: 'x' })])
+    const work = binding.reserveRun(input('work', [{ id: 'user', role: 'user', content: 'call' }], [TOOL]), 'work')
+    binding.drive(work)
+    await work.done
+    const cancel = vi.spyOn(binding.liveAgent, 'cancel')
+    const active = binding.reserveRun(input('continue', [{ id: 'result', role: 'tool', toolCallId: 'pending', content: 'ok' }]), 'continue')
+    const request = input('history', [])
+    const read = await binding.admit(request, 'history', new AbortController().signal)
+    if ('replay' in read) throw new Error('Expected history admission')
+    binding.disconnect(read)
+    await read.done
+    expect(binding.getRun('history')).toBeUndefined()
+    const retry = await binding.admit(request, 'history', new AbortController().signal)
+    if ('replay' in retry) throw new Error('Expected fresh retry')
+    retry.start()
+    binding.disconnect(retry)
+    await retry.done
+    expect(await binding.admit(request, 'history', new AbortController().signal)).toEqual({ replay: retry.record })
+    expect(retry.record.events.map(event => event.type)).toEqual([EventType.RUN_STARTED, EventType.RUN_ERROR])
+    expect(active.record.state).toBe('active')
+    expect(cancel).not.toHaveBeenCalled()
+  })
+
+  it('keeps an admitted history run alive until its own settlement', async () => {
+    vi.useFakeTimers()
+    const { binding, expired } = await mount([], { threadIdleMs: 20 })
+    const read = await binding.admit(input('history', []), 'history', new AbortController().signal)
+    if ('replay' in read) throw new Error('Expected history admission')
+    await vi.advanceTimersByTimeAsync(40)
+    expect(expired()).toBe(0)
+    binding.drive(read)
+    await vi.advanceTimersByTimeAsync(20)
+    expect(expired()).toBe(1)
+  })
+
+  it('keeps a queued run alive through native cancellation and restores expiry when its client leaves', async () => {
+    vi.useFakeTimers()
+    const gate = Promise.withResolvers<StreamChunk[]>()
+    const { binding, adapter, expired } = await mount([gate.promise], { threadIdleMs: 20 })
+    const first = binding.reserveRun(input('first', [{ id: 'first-user', role: 'user', content: 'wait' }]), 'first')
+    binding.drive(first)
+    await vi.waitFor(() => expect(adapter.requests).toHaveLength(1))
+    binding.disconnect(first)
+    await first.done
+    expect(binding.liveAgent.status).toBe('running')
+    const gone = new AbortController()
+    const queued = binding.admit(input('queued', [{ id: 'queued-user', role: 'user', content: 'next' }]), 'queued', gone.signal)
+    const left = expect(queued).rejects.toMatchObject({ code: 'CLIENT_DISCONNECTED' })
+    try {
+      await vi.advanceTimersByTimeAsync(40)
+      expect(expired()).toBe(0)
+      gone.abort()
+      await left
+      expect(binding.getRun('queued')).toBeUndefined()
+      await vi.advanceTimersByTimeAsync(20)
+      expect(expired()).toBe(1)
+    } finally {
+      gone.abort()
+      await left
+      gate.resolve(textResponse('cancelled'))
+      await binding.liveAgent.whenIdle()
+    }
   })
 
   it('does not reserve a queued run aborted in the active-run settlement tick', async () => {
@@ -321,8 +465,8 @@ describe('ThreadBinding run admission', () => {
 
   it('reports a full ledger when its oldest entry is active', async () => {
     const { binding } = await mount([], { maxRunsPerThread: 1 })
-    const state = internals(binding)
-    state.runLedger.set('orphan-active', { digest: 'orphan', events: [], state: 'active', bytes: 0 })
+    const read = await binding.admit(input('active-history', []), 'history', new AbortController().signal)
+    if ('replay' in read) throw new Error('Expected history admission')
     expect(() => binding.reserveRun(input('run-full', [{ id: 'message-full', role: 'user', content: 'hello' }]), 'digest-full')).toThrow('run ledger is full')
   })
 
