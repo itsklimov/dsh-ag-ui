@@ -1,7 +1,13 @@
+import {
+  EventType,
+  type AssistantMessage as AgUiAssistantMessage,
+  type BaseEvent,
+  type CustomEvent,
+  type Message as AgUiMessage,
+} from '@ag-ui/core'
 import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
-import { EventType, type BaseEvent, type CustomEvent, type Message as AgUiMessage } from '@ag-ui/core'
 import type { ContentBlock, ToolResultBlock } from '@deepseek-ai/dsh-llm'
-import { type SessionId, type SessionEvent, type TurnEndReason } from '@deepseek-ai/dsh-session'
+import { isAppendSurfaceEvent, type SessionId, type SessionEvent, type TurnEndReason } from '@deepseek-ai/dsh-session'
 import {
   parseToolArguments,
   toolViewCallEnvelope,
@@ -196,6 +202,7 @@ export class SessionProjection {
         this.toolCallLifecycles.delete(callId)
         const args = this.callArguments.get(callId)
         this.callArguments.delete(callId)
+        this.serverResultCallIds.add(callId)
         if (lifecycle?.kind === 'state') {
           const commit = lifecycle.commit
           if (commit !== undefined && !block.isError && commit.changed) {
@@ -204,7 +211,6 @@ export class SessionProjection {
           }
           return EMPTY_STEP
         }
-        this.serverResultCallIds.add(callId)
         if (lifecycle?.kind === 'frontend' || lifecycle?.kind === 'awaiting') return EMPTY_STEP
         const result = {
           type: EventType.TOOL_CALL_RESULT,
@@ -212,6 +218,7 @@ export class SessionProjection {
           toolCallId: callId,
           content: renderToolResult(block),
           role: 'tool',
+          ...(isUnknownRecord(event.data.meta) ? { metadata: structuredClone(event.data.meta) } : {}),
         }
         if (lifecycle === undefined) return { events: [result] }
         return {
@@ -326,7 +333,7 @@ export class SessionProjection {
   }
 
   /**
-   * Derive the full AG-UI message history from the durable session log, with
+   * Derive the human transcript from append-origin surface events, with
    * ids identical to the streaming projections: user messages keep the ids the
    * client sent, assistant messages use the step identity, tool results use the
    * call identity.
@@ -336,6 +343,7 @@ export class SessionProjection {
   messagesSnapshot(events: readonly SessionEvent[], userMessageId: (durableId: string) => string | undefined): AgUiMessage[] {
     const messages: AgUiMessage[] = []
     for (const event of events) {
+      if (!isAppendSurfaceEvent(event)) continue
       if (event.type === 'user/message') {
         if (event.data.source.kind !== 'user') continue
         const id = userMessageId(String(event.data.id))
@@ -343,20 +351,25 @@ export class SessionProjection {
         messages.push({ id, role: 'user', content: joinText(event.data.content) })
       } else if (event.type === 'assistant/message') {
         const text = joinText(event.data.message.content)
-        if (text === '') continue
+        const toolCalls = assistantToolCalls(event.data.message.content)
+        if (text === '' && toolCalls.length === 0) continue
         messages.push({
           id: assistantMessageId(this.sessionId, event.data.turn, event.data.step),
           role: 'assistant',
-          content: text,
+          ...(text === '' ? {} : { content: text }),
+          ...(toolCalls.length === 0 ? {} : { toolCalls }),
         })
       } else if (event.type === 'tool/result') {
         const block = event.data.message.content[0]
         const callId = String(block.toolCallId)
+        const metadata = isUnknownRecord(event.data.meta) ? structuredClone(event.data.meta) : undefined
         messages.push({
           id: resultMessageId(this.sessionId, callId),
           role: 'tool',
           toolCallId: callId,
           content: renderToolResult(block),
+          ...(metadata === undefined ? {} : { metadata }),
+          ...(block.isError ? { error: renderToolResult(block) || 'Tool execution failed' } : {}),
         })
       }
     }
@@ -380,7 +393,7 @@ export class SessionProjection {
     for (const event of events) {
       if (event.type === 'tool/call') {
         calls.set(String(event.data.callId), { toolName: event.data.name, args: parseToolArguments(event.data.arguments) })
-      } else if (event.type === 'tool/result') {
+      } else if (event.type === 'tool/result' && isAppendSurfaceEvent(event)) {
         const block = event.data.message.content[0]
         const callId = String(block.toolCallId)
         const call = calls.get(callId)
@@ -425,6 +438,21 @@ function resultMessageId(sessionId: SessionId, callId: string): string {
 /** Names of the tool calls one assistant message announced, in model order. */
 function announcedToolNames(content: readonly ContentBlock[]): string[] {
   return content.filter(block => block.type === 'tool-call').map(block => block.name)
+}
+
+/** Rebuild the AG-UI assistant Tool calls announced by one durable DSH message. */
+function assistantToolCalls(content: readonly ContentBlock[]): NonNullable<AgUiAssistantMessage['toolCalls']> {
+  return content
+    .filter((block): block is Extract<ContentBlock, { type: 'tool-call' }> => block.type === 'tool-call')
+    .map(block => ({
+      id: String(block.id),
+      type: 'function',
+      function: { name: block.name, arguments: block.arguments },
+    }))
+}
+
+function isUnknownRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 /** Concatenate the text blocks of one message's content. */
