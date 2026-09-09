@@ -1,4 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
+import { mkdir, realpath } from 'node:fs/promises'
+import { join } from 'node:path'
 import {
   EventType,
   type Message as AgUiMessage,
@@ -45,6 +47,8 @@ const SCHEDULING_PROBE = {
 export interface ThreadOptions {
   readonly provider: string
   readonly model: string
+  /** Absolute root containing the deterministic thread workspace. */
+  readonly workspaceRoot: string
   /** Preset id composed into the thread's agents; absent keeps the host composition. */
   readonly presetId?: string
   readonly frontendToolTimeoutMs: number
@@ -90,12 +94,22 @@ interface SharedStateBaseline {
   readonly value: unknown
 }
 
+/** Canonical paths owned by one thread binding. */
+export interface ThreadWorkspace {
+  readonly cwd: string
+}
+
+interface WorkspaceRegistryLike {
+  create(path: string, title?: string): Promise<unknown>
+}
+
 /** One authenticated process-local AG-UI thread and its owned DSH Agent. */
 export class ThreadBinding {
   /** Deterministic durable DSH session identity, derived from the authenticated thread tuple. */
   readonly sessionId: SessionId
   /** Authenticated principal and client thread tuple owning this binding. */
   readonly identity: AgUiThreadIdentity
+  private workspaceValue: ThreadWorkspace | undefined
   /** Pure session-event to wire-event translation owned by this thread. */
   private readonly projection: SessionProjection
   /** Presenter seam: definitions resolve in the owning Agent's scope; client Tools present themselves. */
@@ -145,19 +159,62 @@ export class ThreadBinding {
 
   private async restoreOrCreate(): Promise<AgentHandle> {
     const agentOptions = { provider: this.options.provider, model: this.options.model }
-    // the resolved preset is snapshotted into durable meta at creation, before any await
-    const meta = this.options.presetId === undefined ? {} : { meta: { agentPreset: this.options.presetId } }
-    const create = () => this.ctx.agents.create({ sessionId: this.sessionId, ...meta, agentOptions, setup: this.agentSetup() })
+    const create = () => this.create(agentOptions)
     if (this.ctx.get('sessionPersistence') === undefined) return create()
     try {
       const handle = await this.ctx.agents.resume({ resumeSessionId: this.sessionId, agentOptions, setup: this.agentSetup() })
-      this.recover(handle.agent.session.snapshotEvents())
-      return handle
+      try {
+        const recordedCwd = handle.agent.session.header.cwd
+        if (recordedCwd === undefined) {
+          this.ctx.logger.warn(`ag-ui: resumed legacy session ${String(this.sessionId)} without a workspace cwd`)
+        } else {
+          const workspace = await this.prepareWorkspace()
+          if (recordedCwd !== workspace.cwd) {
+            throw new AgUiGatewayError(
+              'SESSION_CWD_MISMATCH',
+              'The persisted session workspace does not match the configured thread workspace.',
+              409,
+            )
+          }
+          this.workspaceValue = workspace
+        }
+        this.recover(handle.agent.session.snapshotEvents())
+        return handle
+      } catch (error) {
+        await handle.dispose()
+        throw error
+      }
     } catch (error) {
       // A missing log permits creation; corruption, format refusal, and setup failures do not.
       if (!(error instanceof SessionPersistenceNotFoundError)) throw error
       return create()
     }
+  }
+
+  private async create(agentOptions: { provider: string; model: string }): Promise<AgentHandle> {
+    const workspace = await this.prepareWorkspace()
+    const registry = workspaceRegistryOf(this.ctx)
+    if (registry !== undefined) await registry.create(workspace.cwd, String(this.sessionId))
+    const meta = {
+      cwd: workspace.cwd,
+      ...(this.options.presetId === undefined ? {} : { agentPreset: this.options.presetId }),
+    }
+    const handle = await this.ctx.agents.create({
+      sessionId: this.sessionId,
+      meta,
+      agentOptions,
+      setup: this.agentSetup(),
+    })
+    this.workspaceValue = workspace
+    return handle
+  }
+
+  private async prepareWorkspace(): Promise<ThreadWorkspace> {
+    // named by the durable session id so the client thread id stays off disk
+    const directory = join(this.options.workspaceRoot, String(this.sessionId))
+    await mkdir(directory, { recursive: true })
+    const cwd = await realpath(directory)
+    return { cwd }
   }
 
   private agentSetup(): AgentSetup {
@@ -215,6 +272,11 @@ export class ThreadBinding {
       throw new AgUiGatewayError('AGENT_NOT_AVAILABLE', 'The AG-UI thread Agent is unavailable.', 410)
     }
     return this.agent
+  }
+
+  /** Canonical workspace paths, or undefined when a legacy session recorded no cwd. */
+  get workspace(): ThreadWorkspace | undefined {
+    return this.workspaceValue
   }
 
   /**
@@ -875,6 +937,11 @@ function isEmptyStateContainer(value: unknown): boolean {
 /** Digest one accepted user message in a fixed field order, stable across cold resume. */
 function messageDigest(clientId: string, content: string): string {
   return valueDigest({ id: clientId, role: 'user', content })
+}
+
+/** Resolve the optional host workspace registry without requiring the package. */
+function workspaceRegistryOf(ctx: Context): WorkspaceRegistryLike | undefined {
+  return (ctx as Context & { get(name: string): unknown }).get('workspaceRegistry') as WorkspaceRegistryLike | undefined
 }
 
 /** Narrow a JSON object without accepting arrays or null. */
