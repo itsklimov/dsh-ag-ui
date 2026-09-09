@@ -346,6 +346,11 @@ export class SessionProjection {
       if (event.type === 'tool/call' && event.data.name === STATE_TOOL_NAME) {
         stateCalls.add(String(event.data.callId))
       }
+      if (event.type === 'assistant/message') {
+        for (const block of event.data.message.content) {
+          if (block.type === 'tool-call' && block.name === STATE_TOOL_NAME) stateCalls.add(String(block.id))
+        }
+      }
       if (!isAppendSurfaceEvent(event)) continue
       if (event.type === 'user/message') {
         if (event.data.source.kind !== 'user') continue

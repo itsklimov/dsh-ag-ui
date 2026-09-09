@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { EventType, type BaseEvent } from '@ag-ui/core'
 import { LlmAttemptId, ToolCallId, createAssistantMessage, createToolResultMessage } from '@deepseek-ai/dsh-llm'
-import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { SessionId, SessionSeq, interruptedTurnClosers, TOOL_NOT_STARTED, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { durableUserId, SessionProjection, STATE_TOOL_NAME, type ToolCallLifecycle } from '../src/projection.ts'
 import { TOOL_VIEW_NAME, type ToolPresenter, type ToolViewEnvelope } from '../src/tool-view.ts'
@@ -388,6 +388,36 @@ describe('SessionProjection shared state', () => {
 })
 
 describe('SessionProjection history snapshot', () => {
+  it('hides state-tool crash repairs when the announced call never started', () => {
+    const prefix = [
+      event('turn/start', { turn: 1 }),
+      event('step/start', { turn: 1, step: 1 }),
+      event('assistant/message', {
+        turn: 1,
+        step: 1,
+        message: createAssistantMessage({
+          content: [
+            { type: 'tool-call', id: ToolCallId('state'), name: STATE_TOOL_NAME, arguments: '{}' },
+            { type: 'tool-call', id: ToolCallId('visible'), name: 'lookup', arguments: '{}' },
+          ],
+          source: { provider: 'scripted', model: 'scripted' },
+        }),
+      }),
+    ].map((value, index) => ({ ...value, seq: SessionSeq(index) }))
+    const repairs = interruptedTurnClosers(prefix)
+    expect(repairs.filter(value => value.type === 'tool/result'))
+      .toMatchObject([{ data: { error: { code: TOOL_NOT_STARTED } } }, { data: { error: { code: TOOL_NOT_STARTED } } }])
+
+    const projection = new SessionProjection(sessionId, presenter)
+    expect(projection.messagesSnapshot([...prefix, ...repairs], () => undefined)).toEqual([
+      { id: messageId, role: 'assistant', toolCalls: [
+        { id: 'visible', type: 'function', function: { name: 'lookup', arguments: '{}' } },
+      ] },
+      { id: 'ag-ui:ag-ui-projection-test:visible:result', role: 'tool', toolCallId: 'visible',
+        content: expect.any(String), error: expect.any(String) },
+    ])
+  })
+
   it.each([false, true])('keeps state-tool protocol traffic out of live and cold transcripts (mixed: %s)', mixed => {
     const announcement = event('assistant/message', {
       turn: 1,
