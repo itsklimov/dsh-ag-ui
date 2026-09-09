@@ -42,7 +42,7 @@ class InspectableDshAgent extends DshAgent {
 }
 
 describe('DshAgent', () => {
-  it('sends only the admission tail while retaining the full local history', () => {
+  it('omits presentation messages while retaining all user input', () => {
     const agent = new InspectableDshAgent({
       threadId: 'adapter-thread',
       gateway: { provider: 'scripted', model: 'scripted' },
@@ -62,7 +62,7 @@ describe('DshAgent', () => {
       forwardedProps: {},
     }
 
-    expect(agent.requestBody(input).messages).toEqual([nextUser])
+    expect(agent.requestBody(input).messages).toEqual([input.messages[0], nextUser])
     expect(input.messages).toHaveLength(3)
   })
 
