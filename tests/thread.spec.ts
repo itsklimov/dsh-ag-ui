@@ -1506,3 +1506,20 @@ describe('ThreadBinding session projection', () => {
     expect(controller.record.events.at(-1)).toMatchObject({ type, ...(code === undefined ? {} : { code }) })
   })
 })
+
+describe('deliverable filesystem availability', () => {
+  it('keeps native declarations visible when the restored host has no filesystem', async () => {
+    const { binding } = await mount()
+    const event = binding.liveAgent.session.append('deliverables/presented', {
+      turn: 1, callId: ToolCallId('present'), files: [{ path: 'report.txt' }],
+    })
+    await expect(binding.readDeliverable(event.seq, 0, 1024, new AbortController().signal))
+      .rejects.toMatchObject({ code: 'FILES_UNSUPPORTED', status: 409 })
+    const history = binding.reserveRun(input('history', []))
+    binding.drive(history)
+    await history.done
+    expect(history.record.events.find(event => event.type === EventType.MESSAGES_SNAPSHOT)).toMatchObject({
+      messages: [{ activityType: 'dsh-deliverables', content: { files: [{ url: `/ag-ui/threads/thread-1/deliverables/${event.seq}/files/0` }] } }],
+    })
+  })
+})

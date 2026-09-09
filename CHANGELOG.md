@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Native `present` declarations project as durable `dsh-deliverables` activities with authenticated, bounded Session-filesystem downloads.
+
 - Deterministic per-thread workspaces with DSH Web workspace registration when the Host provides it.
 - Bidirectional shared state with `STATE_SNAPSHOT` and the reserved `ag_ui_update_state` Tool.
 - Dojo-compatible keyless examples for chat, backend Tools, shared state, HITL, and tool-based generative UI.
@@ -18,6 +20,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `MESSAGES_SNAPSHOT` now includes the user messages the run just admitted and is emitted only after admission, so a client keeps the message it sent and a rejected run leaves its history untouched.
 
 ### Changed
+
+- Align Gateway and adapter Harness peers with `0.1.5-alpha.2` for native deliverable declarations and bounded filesystem reads.
 
 - A run admits every new user message it carries into one DSH turn, in arrival order, and a run without new messages only synchronizes history; `INVALID_MESSAGE_BATCH` remains for batches mixing user messages with frontend Tool results.
 - Runs of one thread now queue in arrival order behind the active run instead of failing with `RUN_IN_PROGRESS`; a waiting client that disconnects is never admitted.
