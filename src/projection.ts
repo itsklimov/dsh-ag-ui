@@ -341,7 +341,11 @@ export class SessionProjection {
    */
   messagesSnapshot(events: readonly SessionEvent[], userMessageId: (durableId: string) => string | undefined): AgUiMessage[] {
     const messages: AgUiMessage[] = []
+    const stateCalls = new Set<string>()
     for (const event of events) {
+      if (event.type === 'tool/call' && event.data.name === STATE_TOOL_NAME) {
+        stateCalls.add(String(event.data.callId))
+      }
       if (!isAppendSurfaceEvent(event)) continue
       if (event.type === 'user/message') {
         if (event.data.source.kind !== 'user') continue
@@ -361,6 +365,7 @@ export class SessionProjection {
       } else if (event.type === 'tool/result') {
         const block = event.data.message.content[0]
         const callId = String(block.toolCallId)
+        if (stateCalls.has(callId)) continue
         messages.push({
           id: resultMessageId(this.sessionId, callId),
           role: 'tool',
@@ -440,7 +445,7 @@ function announcedToolNames(content: readonly ContentBlock[]): string[] {
 /** Rebuild the AG-UI assistant Tool calls announced by one durable DSH message. */
 function assistantToolCalls(content: readonly ContentBlock[]): NonNullable<AgUiAssistantMessage['toolCalls']> {
   return content
-    .filter((block): block is Extract<ContentBlock, { type: 'tool-call' }> => block.type === 'tool-call')
+    .filter((block): block is Extract<ContentBlock, { type: 'tool-call' }> => block.type === 'tool-call' && block.name !== STATE_TOOL_NAME)
     .map(block => ({
       id: String(block.id),
       type: 'function',

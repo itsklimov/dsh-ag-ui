@@ -388,6 +388,39 @@ describe('SessionProjection shared state', () => {
 })
 
 describe('SessionProjection history snapshot', () => {
+  it.each([false, true])('keeps state-tool protocol traffic out of live and cold transcripts (mixed: %s)', mixed => {
+    const announcement = event('assistant/message', {
+      turn: 1,
+      step: 1,
+      message: createAssistantMessage({
+        content: [
+          { type: 'tool-call', id: ToolCallId('state'), name: STATE_TOOL_NAME, arguments: '{}' },
+          ...(mixed ? [
+            { type: 'text' as const, text: 'Working.' },
+            { type: 'tool-call' as const, id: ToolCallId('visible'), name: 'lookup', arguments: '{}' },
+          ] : []),
+        ],
+        source: { provider: 'scripted', model: 'scripted' },
+      }),
+    })
+    const events = [announcement, toolCall('state', STATE_TOOL_NAME), toolResult('state'),
+      ...(mixed ? [toolCall('visible', 'lookup'), toolResult('visible')] : [])]
+    const live = new SessionProjection(sessionId, presenter)
+    const streamed = events.flatMap(value => live.project(value, 1).events)
+    expect(streamed.filter(value => 'toolCallId' in value).map(value => value.toolCallId))
+      .toEqual(mixed ? ['visible', 'visible', 'visible', 'visible'] : [])
+
+    const cold = new SessionProjection(sessionId, presenter)
+    const messages = cold.messagesSnapshot(events, () => undefined)
+    expect(messages).toEqual(mixed ? [
+      { id: messageId, role: 'assistant', content: 'Working.', toolCalls: [
+        { id: 'visible', type: 'function', function: { name: 'lookup', arguments: '{}' } },
+      ] },
+      { id: 'ag-ui:ag-ui-projection-test:visible:result', role: 'tool', toolCallId: 'visible', content: 'result of visible' },
+    ] : [])
+    expect(live.messagesSnapshot(events, () => undefined)).toEqual(messages)
+  })
+
   it('derives the full history, including tool-only assistant messages in durable order', () => {
     const projection = new SessionProjection(sessionId, presenter)
     const events = [
