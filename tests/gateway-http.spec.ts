@@ -494,7 +494,7 @@ describe('AG-UI gateway lifecycle', () => {
   })
 
   it('enforces live thread capacity and reclaims an expired thread', async () => {
-    const { ctx, url } = await mount({ maxThreads: 1, threadIdleMs: 20 }, [textResponse('one'), textResponse('two')])
+    const { ctx, url } = await mount({ maxThreads: 1, threadIdleMs: 1000 }, [textResponse('one'), textResponse('two')])
     expect((await post(url, input())).status).toBe(200)
     expectCode(await post(url, input({ threadId: 'thread-2', runId: 'run-2', messages: [{ id: 'message-2', role: 'user', content: 'two' }] })), 429, 'THREAD_LIMIT_REACHED')
 
