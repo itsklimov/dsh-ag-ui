@@ -704,6 +704,39 @@ describe('ThreadBinding frontend Tools', () => {
     expect(result.record.events.at(-1)?.type).toBe(EventType.RUN_FINISHED)
   })
 
+  it('persists configured opaque metadata only on its admitted render result', async () => {
+    const render = { ...TOOL, name: 'render_a2ui' }
+    const { binding } = await mount([scriptedToolResponse('configured-render', render.name, { value: 'x' }), textResponse('done')])
+    const metadata = { owner: { catalog: 'resolved', foreign: ['opaque'] } }
+    const request = { ...input('configured-meta', [{ id: 'configured-user', role: 'user', content: 'render' }], [render]), forwardedProps: { injectA2UITool: true, toolResultMetadata: { render_a2ui: metadata } } }
+    const run = binding.reserveRun(request, 'configured-meta-digest')
+    binding.drive(run)
+    await run.done
+    expect(run.record.events.find(event => event.type === EventType.TOOL_CALL_RESULT)).toMatchObject({ metadata })
+    const snapshot = run.record.events.at(-2)
+    expect(snapshot).toMatchObject({ type: EventType.MESSAGES_SNAPSHOT, messages: expect.arrayContaining([expect.objectContaining({ role: 'tool', toolCallId: 'configured-render', metadata })]) })
+    expect(binding.liveAgent.session.snapshotEvents().find(event => event.type === 'tool/result')).toMatchObject({ data: { meta: metadata } })
+  })
+
+  it('accepts a run with non-object forwarded properties without configured metadata', async () => {
+    const { binding } = await mount()
+    const request = { ...input('no-props', [{ id: 'no-props-user', role: 'user', content: 'hi' }]), forwardedProps: null }
+    const run = binding.reserveRun(request, 'no-props-digest')
+    binding.drive(run)
+    await run.done
+    expect(run.record.events.at(-1)).toMatchObject({ type: EventType.RUN_FINISHED })
+  })
+
+  it.each([null, [], 5, { render_a2ui: { invalid: undefined } }])('rejects invalid configured metadata before executing a model: %j', async metadata => {
+    const { binding, adapter } = await mount([])
+    const request = { ...input('bad-meta', [{ id: 'bad-meta-user', role: 'user', content: 'hi' }]), forwardedProps: { toolResultMetadata: metadata } }
+    const run = binding.reserveRun(request, 'bad-meta-digest')
+    binding.drive(run)
+    await run.done
+    expect(run.record.events.at(-1)).toMatchObject({ type: EventType.RUN_ERROR, code: 'INVALID_TOOL_RESULT_METADATA' })
+    expect(adapter.requests).toHaveLength(0)
+  })
+
   it('persists frontend Tool metadata without changing its model-facing content', async () => {
     const { adapter, binding } = await mount([
       toolResponse('call-metadata', { value: 'x' }),
