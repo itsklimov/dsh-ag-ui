@@ -142,7 +142,6 @@
     "tsdown": "0.22.14",
     "typescript": "6.0.3",
     "vitest": "4.1.11",
-    "@deepseek-ai/dsh-session-persistence": "0.1.5-alpha.1",
     "@deepseek-ai/dsh-client-file-upload": "0.1.5-alpha.1",
     "@deepseek-ai/dsh-client-connection": "0.1.5-alpha.1",
     "@deepseek-ai/dsh-commands": "0.1.5-alpha.1",
