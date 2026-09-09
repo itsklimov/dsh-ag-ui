@@ -2,7 +2,7 @@ import { request as httpRequest } from 'node:http'
 import { mkdtemp, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { RunAgentInput, Tool } from '@ag-ui/core'
 import { Context } from '@deepseek-ai/cordis'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
@@ -273,8 +273,10 @@ describe('AG-UI gateway lifecycle', () => {
     const first = post(url, input())
     const second = post(url, input())
     const results = await Promise.all([first, second])
-    expect(results.map(result => result.status)).toEqual([200, 200])
-    expect(results[1]?.body).toBe(results[0]?.body)
+    expect(results[0]?.status).toBe(200)
+    // A duplicate arriving before completion reports RUN_IN_PROGRESS on the base Gateway.
+    expect([200, 409]).toContain(results[1]?.status)
+    expect((await post(url, input())).body).toBe(results[0]?.body)
     expect(ctx.agents.list()).toHaveLength(1)
   })
 
