@@ -1,5 +1,8 @@
 import { LlmAttemptId } from '@deepseek-ai/dsh-llm'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { mkdtemp, rm, stat } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { EventType, type RunAgentInput, type Tool } from '@ag-ui/core'
 import { Context } from '@deepseek-ai/cordis'
 import { ToolCallId, createAssistantMessage, createToolResultMessage, type StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -10,10 +13,12 @@ import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { ThreadBinding, type ThreadOptions } from '../src/thread.ts'
 
 const contexts: Context[] = []
+const workspaceRoots: string[] = []
 
 afterEach(async () => {
   vi.useRealTimers()
   for (const ctx of contexts.splice(0).reverse()) await ctx.fiber.dispose()
+  await Promise.all(workspaceRoots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 
 const TOOL: Tool = {
@@ -27,7 +32,7 @@ const TOOL: Tool = {
   },
 }
 
-const OPTIONS: ThreadOptions = {
+const OPTIONS = {
   provider: 'scripted',
   model: 'scripted',
   frontendToolTimeoutMs: 10_000,
@@ -36,7 +41,7 @@ const OPTIONS: ThreadOptions = {
   maxRunEventBytes: 128 * 1024,
   maxRunsPerThread: 4,
   maxStateBytes: 64 * 1024,
-}
+} satisfies Omit<ThreadOptions, 'workspaceRoot'>
 
 function toolResponse(callId: string, args: object): StreamChunk[] {
   return scriptedToolResponse(callId, TOOL.name, args)
@@ -48,13 +53,15 @@ async function mount(script: StreamChunk[][] = [textResponse('ok')], overrides: 
   await mountTestAgentCore(ctx)
   const adapter = new ScriptedAdapter(script)
   ctx.llm.registerAdapter(['scripted'], adapter)
+  const workspaceRoot = await mkdtemp(join(tmpdir(), 'ag-ui-thread-workspaces-'))
+  workspaceRoots.push(workspaceRoot)
   let expired = 0
   const binding = new ThreadBinding(
     ctx,
     { tenantId: 'tenant-1', userId: 'user-1' },
     'thread-1',
     SessionId('ag-ui-thread-spec-session'),
-    { ...OPTIONS, ...overrides },
+    { ...OPTIONS, workspaceRoot, ...overrides },
     () => { expired++ },
   )
   await binding.initialize()
@@ -72,6 +79,54 @@ function input(runId: string, messages: RunAgentInput['messages'], tools: Tool[]
     forwardedProps: {},
   }
 }
+
+describe('thread workspaces', () => {
+  it('creates a workspace without a registry and registers once when one is present', async () => {
+    const headless = await mount()
+    expect((await stat(headless.binding.workspace?.cwd ?? '')).isDirectory()).toBe(true)
+
+    const ctx = new Context()
+    contexts.push(ctx)
+    await mountTestAgentCore(ctx)
+    ctx.llm.registerAdapter(['scripted'], new ScriptedAdapter([textResponse('ok')]))
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'ag-ui-registry-workspaces-'))
+    workspaceRoots.push(workspaceRoot)
+    const create = vi.fn(async () => ({}))
+    ctx.provide('workspaceRegistry', { create })
+    const binding = new ThreadBinding(
+      ctx,
+      { tenantId: 'tenant-1', userId: 'user-1' },
+      'registry-thread',
+      SessionId('ag-ui-registry-session'),
+      { ...OPTIONS, workspaceRoot },
+      () => {},
+    )
+    await binding.initialize()
+    expect(create).toHaveBeenCalledOnce()
+    expect(create).toHaveBeenCalledWith(binding.workspace?.cwd, 'ag-ui-registry-session')
+    expect(binding.workspace?.cwd).not.toContain('registry-thread')
+  })
+
+  it('keeps workspace registry failures loud', async () => {
+    const ctx = new Context()
+    contexts.push(ctx)
+    await mountTestAgentCore(ctx)
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'ag-ui-registry-failure-'))
+    workspaceRoots.push(workspaceRoot)
+    const failure = new Error('workspace registry unavailable')
+    ctx.provide('workspaceRegistry', { create: async () => Promise.reject(failure) })
+    const binding = new ThreadBinding(
+      ctx,
+      { tenantId: 'tenant-1', userId: 'user-1' },
+      'registry-failure',
+      SessionId('ag-ui-registry-failure-session'),
+      { ...OPTIONS, workspaceRoot },
+      () => {},
+    )
+    await expect(binding.initialize()).rejects.toBe(failure)
+    expect(ctx.agents.list()).toHaveLength(0)
+  })
+})
 
 async function settle(controller: ReturnType<ThreadBinding['reserveRun']>): Promise<void> {
   controller.start()
