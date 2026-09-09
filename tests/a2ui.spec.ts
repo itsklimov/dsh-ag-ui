@@ -195,8 +195,7 @@ describe('official A2UI middleware contract', () => {
 
   it('reconstructs the same canonical render transcript after JSONL recovery in a new Context', async () => {
     const persistenceRoot = await mkdtemp(join(tmpdir(), 'ag-ui-a2ui-persistence-'))
-    const workspaceRoot = await mkdtemp(join(tmpdir(), 'ag-ui-a2ui-workspaces-'))
-    roots.push(persistenceRoot, workspaceRoot)
+    roots.push(persistenceRoot)
     const action = {
       name: 'refresh',
       surfaceId: 'durable-overview',
@@ -212,7 +211,7 @@ describe('official A2UI middleware contract', () => {
       }),
       textResponse('The durable overview is ready.'),
       textResponse('The durable action was handled.'),
-    ], SECRET, { persistenceRoot, workspaceRoot })
+    ], SECRET, { persistenceRoot })
     const agent = new HttpAgent({ url: first.url, headers: HEADERS, threadId: 'a2ui-durable-thread' })
       .use(new A2UIMiddleware({ injectA2UITool: true, defaultCatalogId: 'catalog.test' }))
     agent.addMessage({ id: 'a2ui-durable-user', role: 'user', content: 'Render durably.' })
@@ -231,7 +230,6 @@ describe('official A2UI middleware contract', () => {
 
     const second = await mountGateway([textResponse('Recovered action context retained.')], SECRET, {
       persistenceRoot,
-      workspaceRoot,
     })
     const recovered = new HttpAgent({ url: second.url, headers: HEADERS, threadId: 'a2ui-durable-thread' })
       .use(new A2UIMiddleware({ injectA2UITool: true, defaultCatalogId: 'catalog.test' }))
