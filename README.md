@@ -126,6 +126,8 @@ A later Profile patch replaces the bundle row's complete `config`; include every
 | `maxThreads` | `100` | Maximum process-local live threads |
 | `threadIdleMs` | `1800000` | Idle thread lifetime |
 | `frontendToolTimeoutMs` | `300000` | Maximum browser Tool result wait |
+| `humanInteractionTimeoutMs` | `300000` | Maximum wait for each native human request |
+| `maxPendingInterrupts` | `16` | Maximum live human requests per thread |
 | `maxRunEvents` | `4096` | Maximum events retained per run |
 | `maxRunEventBytes` | `2097152` | Maximum retained event bytes per run |
 | `maxRunsPerThread` | `32` | Maximum retained run ledger entries and, separately, waiting requests per thread |
@@ -249,6 +251,32 @@ await agent.runAgent({
 If the model calls a browser-owned Tool, the current HTTP run finishes successfully while the DSH Tool Promise remains pending. The browser executes the Tool, appends one standard AG-UI ToolMessage with the same `toolCallId`, and starts another run. The Gateway resolves the original Promise and continues the same DSH turn.
 
 Do not send ordinary browser Tool results through AG-UI `resume[]`; that field is reserved for explicit interrupt/HITL flows.
+
+### Native questions and approvals
+
+Mount the native `@deepseek-ai/dsh-user-questions` and/or `@deepseek-ai/dsh-user-approval` services in the Host profile. A business preset can mount the official `@deepseek-ai/dsh-tool-ask-user` Tool. The Gateway answers requests only for its exact live root Agent; it does not install the services, replace their policies, or handle subagent questions.
+
+A native human request ends the HTTP run with `RUN_FINISHED` and `outcome: {type: "interrupt", interrupts: [...]}`. The Harness turn continues waiting on its original Promise. Submit a fresh `runId` in the same thread with `resume[]` to answer it:
+
+```json
+{
+  "threadId": "thread-1",
+  "runId": "answer-1",
+  "messages": [], "tools": [], "context": [], "state": {}, "forwardedProps": {},
+  "resume": [{"interruptId": "<published-id>", "status": "resolved", "payload": {"approved": true}}]
+}
+```
+
+Approval interrupts use `reason: "approval"`, optional native `toolCallId`, and `{approved: boolean}` as their response. `false` rejects this action; `status: "cancelled"` withdraws the request. Only the native service can grant `allowed-once`, and its `never` policy still rejects without prompting. Gateway responses never grant lasting permission or manufacture backend Tool results.
+
+Question interrupts use `reason: "user_question"`. `metadata.dsh.questions` contains the native questions, options and optional intent; `responseSchema` describes the answer structure. Respond with `{answers: [{id, selected: ["option label"], custom?: "text"}]}`. Answer every question exactly once. Single-select questions accept one option or custom text; multi-select permits both. A cancelled question rejects through the native `ASK_ABORTED` error.
+
+Every published interrupt must appear once in a resume batch. Validation precedes SSE, message admission, context/state changes and answer consumption. Invalid batches leave the pending work untouched. New user messages cannot share a run with human responses; already-ready frontend Tool results of the same turn can. Unknown interrupt ids are logged and ignored within the authenticated thread. Retained identical run ids replay without answering twice.
+
+A history-only run repeats the same published interrupt ids and shared-state snapshot. Later native questions wait for the next accepted continuation; reload does not enlarge a form another tab already received. A newly discovered question may follow a frontend Tool's completed HTTP run; the next continuation or history read publishes it.
+
+Each request has a finite server deadline, unaffected by reconnect. Timeout, native abort, overflow or disposal cancels the waiting work. A known expired resolved response returns `INTERRUPT_UNAVAILABLE`; send `status: "cancelled"` to clear that stale client gate without executing anything. `expiresAt` is omitted because current clients also reject cancellation of expired interrupts.
+
 
 ## Shared state
 
@@ -417,10 +445,11 @@ An unchanged Tool set preserves the Tool-schema prefix. Adding, removing, or cha
 ## Known limitations
 
 - Live thread bindings, run replay buffers, and shared state are process-local; session history can persist through the Host persistence plugin.
-- Host restart resumes stored sessions with `agents.resume()`. Parked browser Tools are not recovered: an interrupted turn reports `THREAD_INTERRUPTED`, and shared state needs a new client baseline.
+- Host restart resumes stored sessions with `agents.resume()`. Parked browser Tools and human request Promises are not recovered: an interrupted turn reports `THREAD_INTERRUPTED`, and shared state needs a new client baseline.
 - Only text user input, assistant text, and string Tool results are adapted.
-- Partial SSE reconnect is not supported.
-- `STATE_DELTA`, AG-UI interrupt/HITL `resume[]`, multimodal messages, reasoning events, and activity events are not adapted yet.
+- Partial SSE reconnect is not supported. Human questions reconnect through a fresh history-only run.
+- Human interaction supports root Agents only. If the embedding adapter enables `idleShutdownMs`, its independent child-process shutdown can interrupt a human wait; leave auto-shutdown disabled when live resumption is required.
+- `STATE_DELTA`, multimodal messages, reasoning events, and activity events are not adapted yet.
 - Shared-state updates use shallow top-level merge and do not provide versions, deep merge, or conflict resolution.
 
 ## Development

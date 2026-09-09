@@ -75,6 +75,10 @@ export interface Config {
   threadIdleMs?: number
   /** Frontend Tool result timeout in milliseconds. */
   frontendToolTimeoutMs?: number
+  /** Human answer timeout in milliseconds. */
+  humanInteractionTimeoutMs?: number
+  /** Maximum pending human requests per thread. */
+  maxPendingInterrupts?: number
   /** Maximum retained events in one run ledger entry. */
   maxRunEvents?: number
   /** Maximum retained event bytes in one run ledger entry. */
@@ -108,6 +112,8 @@ export const Config: z<Config> = z.object({
   maxThreads: z.natural().default(100),
   threadIdleMs: z.natural().default(30 * 60 * 1000),
   frontendToolTimeoutMs: z.natural().default(5 * 60 * 1000),
+  humanInteractionTimeoutMs: z.natural().default(5 * 60 * 1000),
+  maxPendingInterrupts: z.natural().default(16),
   maxRunEvents: z.natural().default(4096),
   maxRunEventBytes: z.natural().default(2 * 1024 * 1024),
   maxRunsPerThread: z.natural().default(32),
@@ -285,6 +291,8 @@ export class AgUiGateway extends Service implements AgUiAgentLookup {
       model: this.resolved.model,
       ...(presetId === undefined ? {} : { presetId }),
       frontendToolTimeoutMs: this.resolved.frontendToolTimeoutMs,
+      humanInteractionTimeoutMs: this.resolved.humanInteractionTimeoutMs,
+      maxPendingInterrupts: this.resolved.maxPendingInterrupts,
       threadIdleMs: this.resolved.threadIdleMs,
       maxRunEvents: this.resolved.maxRunEvents,
       maxRunEventBytes: this.resolved.maxRunEventBytes,
@@ -355,6 +363,9 @@ function assertConfig(ctx: Context, config: Required<Config>): void {
     if ((name.startsWith('max') || name.endsWith('Ms')) && typeof value === 'number' && value <= 0) {
       throw new Error(`ag-ui: ${name} must be positive`)
     }
+  }
+  for (const name of ['humanInteractionTimeoutMs', 'maxPendingInterrupts'] as const) {
+    if (!Number.isSafeInteger(config[name])) throw new Error(`ag-ui: ${name} must be a finite positive integer`)
   }
   if (config.maxRunEvents < 2) throw new Error('ag-ui: maxRunEvents must retain opening and terminal events')
   const longestId = 'x'.repeat(config.maxIdentityBytes)

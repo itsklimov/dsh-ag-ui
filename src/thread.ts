@@ -22,6 +22,7 @@ import { AgUiGatewayError } from './errors.ts'
 import { jsonBytes, valueDigest } from './json.ts'
 import { consumedMessages, durableUserId, SessionProjection, STATE_TOOL_NAME } from './projection.ts'
 import { agentPresetsOf, sessionPresetOf } from './presets.ts'
+import { PendingInterrupts, type PreparedResume } from './interrupts.ts'
 import { RunController, type RunRecord } from './run.ts'
 import type { ToolPresenter } from './tool-view.ts'
 import type { AgUiPrincipal, AgUiThreadIdentity } from './types.ts'
@@ -43,6 +44,8 @@ export interface ThreadOptions {
   readonly model: string
   /** Preset id composed into the thread's agents; absent keeps the host composition. */
   readonly presetId?: string
+  readonly humanInteractionTimeoutMs?: number
+  readonly maxPendingInterrupts?: number
   readonly frontendToolTimeoutMs: number
   readonly threadIdleMs: number
   readonly maxRunEvents: number
@@ -104,6 +107,7 @@ export class ThreadBinding {
   private interrupted = false
   private activeRun: RunController | undefined
   private nativeTurn: number | undefined
+  private readonly interrupts: PendingInterrupts
   private waitingRuns = 0
   private idleTimer: ReturnType<typeof setTimeout> | undefined
   private readonly acceptedMessages = new Map<string, AcceptedMessage>()
@@ -126,6 +130,13 @@ export class ThreadBinding {
     this.identity = { principal, threadId }
     this.sessionId = sessionId
     this.projection = new SessionProjection(sessionId, this.presenter)
+    this.interrupts = new PendingInterrupts(options.humanInteractionTimeoutMs ?? 300_000, options.maxPendingInterrupts ?? 16,
+      () => { this.clearIdleExpiry(); this.finishWaitingRun() },
+      (turn, reason) => {
+        /* v8 ignore next -- registration is synchronous; turn completion removes all timers and abort listeners before ownership changes. */
+        if (this.nativeTurn === turn) this.liveAgent.cancel({ kind: 'hook', reason })
+        this.scheduleIdleExpiry()
+      }, message => { this.ctx.logger.warn(message) })
   }
 
   /** Create the Agent — resuming a persisted session when the host configured one — and install scoped listeners before publication. */
@@ -156,6 +167,12 @@ export class ThreadBinding {
   private agentSetup(): AgentSetup {
     return async (agentCtx, agent) => {
       this.agent = agent
+      agentCtx.on('user-questions/request', (request, next) =>
+        request.agent === agent && this.ownsHumanTurn(agent)
+          ? this.interrupts.questions(request, this.nativeTurn!) : next())
+      agentCtx.on('approval/request', (request, next) =>
+        request.agent === agent && this.ownsHumanTurn(agent)
+          ? this.interrupts.approval(request, this.nativeTurn!) : next())
       agentCtx.on('session/event', (session, event) => {
         /* v8 ignore next -- the Agent-scoped listener receives only its exact owned Session. */
         if (session === agent.session) this.onSessionEvent(event)
@@ -183,6 +200,11 @@ export class ThreadBinding {
       // mounting inside the setup window rolls a broken preset back with the whole creation
       await this.mountPreset(agentCtx, agent)
     }
+  }
+
+  private ownsHumanTurn(agent: Agent): boolean {
+    return !this.disposed && this.nativeTurn !== undefined && this.ctx.agents.get(agent.id) === agent
+      && this.ctx.agents.roots().includes(agent)
   }
 
   /** Compose the agent from its preset; a thread resumes the composition its own log recorded. */
@@ -240,7 +262,7 @@ export class ThreadBinding {
     this.assertLive()
     const prior = this.getRun(input.runId, digest)
     if (prior !== undefined) return { replay: prior }
-    if (this.classifyMessages(input).kind === 'sync') return this.retainRun(input, digest)
+    if (this.classifyMessages(input).kind === 'sync' && (input.resume?.length ?? 0) === 0) return this.retainRun(input, digest)
     if (this.waitingRuns >= this.options.maxRunsPerThread) {
       throw new AgUiGatewayError('RUN_QUEUE_FULL', 'The AG-UI thread run queue is full.', 429)
     }
@@ -262,13 +284,15 @@ export class ThreadBinding {
         if (this.activeRun !== undefined) {
           this.ctx.logger.debug(`ag-ui: run ${runId} waits for the active run of session ${session}`)
           await Promise.race([this.activeRun.done, left.promise])
-        } else if (this.pendingCalls.size === 0 && this.liveAgent.status !== 'idle') {
+        } else if (this.pendingCalls.size === 0 && !this.interrupts.waiting && this.liveAgent.status !== 'idle') {
           // a settled run may leave its finishing or cancelled turn converging; parked calls keep a turn open on purpose
           this.ctx.logger.debug(`ag-ui: run ${runId} waits for the Agent of session ${session} to settle`)
           await Promise.race([this.liveAgent.whenIdle(), left.promise])
         } else {
           const replay = this.getRun(input.runId, digest)
-          return replay === undefined ? this.reserveRun(input, digest) : { replay }
+          if (replay !== undefined) return { replay }
+          this.prepareResume(input, this.classifyMessages(input).kind)
+          return this.reserveRun(input, digest)
         }
       }
     } finally {
@@ -308,7 +332,7 @@ export class ThreadBinding {
    */
   drive(controller: RunController): void {
     if (controller.record.state !== 'active' || this.runLedger.get(controller.input.runId) !== controller
-      || (this.activeRun !== controller && this.classifyMessages(controller.input).kind !== 'sync')) {
+      || (this.activeRun !== controller && (this.classifyMessages(controller.input).kind !== 'sync' || (controller.input.resume?.length ?? 0) !== 0))) {
       throw new AgUiGatewayError('RUN_NOT_ACTIVE', 'The AG-UI run lost its reservation.', 409)
     }
     controller.start()
@@ -321,10 +345,12 @@ export class ThreadBinding {
     }
     try {
       const admission = this.classifyMessages(controller.input)
-      if (admission.kind === 'sync') {
+      const resume = this.prepareResume(controller.input, admission.kind)
+      if (admission.kind === 'sync' && resume?.turn === undefined) {
+        resume?.apply()
         this.commitServerEchoes(admission.echoes)
         this.emitHistory(controller, [])
-        controller.success()
+        this.finishHistory(controller)
         return
       }
       if (admission.kind === 'user') {
@@ -333,7 +359,8 @@ export class ThreadBinding {
         return
       }
 
-      const turn = this.continuationTurn(admission.messages)
+      const tools = admission.kind === 'tools' ? admission.messages : []
+      const turn = resume?.turn ?? this.continuationTurn(tools)
       this.emitHistory(controller, [])
       /* v8 ignore next -- a continuation whose history snapshot overflowed the run budget is already settled; the user path covers the same guard. */
       if (controller.record.state !== 'active') return
@@ -345,7 +372,8 @@ export class ThreadBinding {
       this.injectContext(controller.input, baseline)
       this.commitSharedStateBaseline(baseline)
       this.commitServerEchoes(admission.echoes)
-      for (const message of admission.messages) {
+      resume?.apply()
+      for (const message of tools) {
         const pending = this.pendingCalls.get(message.toolCallId)
         /* v8 ignore next 3 -- continuationTurn synchronously verified the identical pending entries. */
         if (pending === undefined) {
@@ -357,7 +385,7 @@ export class ThreadBinding {
         else pending.reject(new Error(`Frontend Tool failed: ${message.error}`))
       }
       // a partial resolution leaves calls parked; finish so the client can answer the rest
-      if (this.pendingCalls.size !== 0) controller.success()
+      if (!this.finishWaitingRun() && this.pendingCalls.size !== 0) controller.success()
     } catch (error) {
       this.failRunAdmission(controller, error)
     }
@@ -458,6 +486,7 @@ export class ThreadBinding {
     if (this.disposed) return
     this.disposed = true
     this.clearIdleExpiry()
+    this.interrupts.cancel()
     for (const controller of this.runLedger.values()) {
       controller.error('AGENT_NOT_AVAILABLE', 'The AG-UI thread was disposed.')
     }
@@ -555,6 +584,36 @@ export class ThreadBinding {
       this.projection.consumeServerResult(echo.toolCallId)
       this.acceptedMessages.set(echo.id, { role: 'tool', digest: valueDigest(echo) })
     }
+  }
+
+  /** Validate human responses without consuming answers or accepted message identities. */
+  private prepareResume(input: RunAgentInput, kind: 'sync' | 'user' | 'tools'): PreparedResume | undefined {
+    const hasResume = (input.resume?.length ?? 0) !== 0
+    if (hasResume && kind === 'user') {
+      throw new AgUiGatewayError('INVALID_MESSAGE_BATCH', 'A run cannot mix user messages and interrupt responses.')
+    }
+    if (!hasResume && this.interrupts.visible.length !== 0 && kind !== 'sync') {
+      throw new AgUiGatewayError('INCOMPLETE_INTERRUPT_RESPONSE', 'Answer the pending interrupts before continuing the turn.', 409)
+    }
+    return hasResume ? this.interrupts.prepare(input.resume!) : undefined
+  }
+
+  /** A readonly history request repeats exactly the previously published questions. */
+  private finishHistory(controller: RunController): void {
+    if (this.sharedStateActive) controller.emit({ type: EventType.STATE_SNAPSHOT, snapshot: structuredClone(this.projection.sharedState) })
+    const interrupts = this.interrupts.publish()
+    if (interrupts.length !== 0) controller.interrupt(interrupts)
+    else controller.success()
+  }
+
+  /** Approval can suspend scheduler prepare, so it must not wait for later tools to start. */
+  private finishWaitingRun(): boolean {
+    const active = this.activeRun
+    if (active === undefined || active.record.state !== 'active' || active.turn !== this.nativeTurn || !this.interrupts.waiting) return false
+    const interrupts = this.interrupts.publish()
+    this.emitFinalSnapshot(active)
+    active.interrupt(interrupts)
+    return true
   }
 
   private continuationTurn(messages: AgUiToolMessage[]): number {
@@ -808,6 +867,7 @@ export class ThreadBinding {
     }
     if (step.outcome !== undefined) {
       this.nativeTurn = undefined
+      this.interrupts.cancel()
       this.scheduleIdleExpiry()
     }
     if (!ownsTurn) return
@@ -882,7 +942,7 @@ export class ThreadBinding {
 
   private scheduleIdleExpiry(): void {
     this.clearIdleExpiry()
-    if (this.disposed || this.nativeTurn !== undefined || this.pendingCalls.size !== 0 || this.activeRun !== undefined || this.waitingRuns !== 0
+    if (this.disposed || this.nativeTurn !== undefined || this.interrupts.waiting || this.pendingCalls.size !== 0 || this.activeRun !== undefined || this.waitingRuns !== 0
       || [...this.runLedger.values()].some(controller => controller.record.state === 'active')) return
     this.idleTimer = setTimeout(() => { this.onExpired(this) }, this.options.threadIdleMs)
   }
