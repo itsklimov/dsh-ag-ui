@@ -211,20 +211,23 @@ The BFF owns login, sessions, CSRF protection, tenant policy, resource authoriza
 
 The AG-UI gateway is one Host-plane service with an HTTP remote; other DSH service plugins can mount routes on the same loopback webserver. The same rule covers every one of them: the browser never reaches the Host directly. Expose each remote through the application backend under an application-owned route, with the authenticate → authorize → forward shape above and the credentials that service expects. The Host port itself stays loopback and unadvertised to clients.
 
-## Browser client
+## AG-UI client
 
-Install the official client in the frontend application. Any release in the supported protocol range (`>=0.0.58 <0.1.0`) works; the gateway never requires an exact client pin:
+The Gateway wire protocol accepts official clients in the supported range (`>=0.0.58 <0.1.0`) and does not require an exact pin. The Gateway-owned `DshHttpAgent` companion is tested and peered with `@ag-ui/client ~0.0.59`:
 
 ```bash
-pnpm add @ag-ui/client
+pnpm add dsh-ag-ui @ag-ui/client@~0.0.59
 ```
+
+Use the Gateway-owned client companion so long conversations do not resend their settled transcript. The agent still retains its complete local history for rendering and middleware; only the HTTP input is narrowed to user and Tool messages after the last assistant boundary.
 
 Send page-specific browser Tools and current context on every run:
 
 ```ts
-import { HttpAgent, randomUUID } from '@ag-ui/client'
+import { randomUUID } from '@ag-ui/client'
+import { DshHttpAgent } from 'dsh-ag-ui/client'
 
-const agent = new HttpAgent({
+const agent = new DshHttpAgent({
   url: '/api/agent',
   threadId: 'application-thread-123',
 })
@@ -245,6 +248,8 @@ await agent.runAgent({
   forwardedProps: {},
 })
 ```
+
+This stateless selection preserves rejected pre-admission messages. A sequence of runs that the Gateway admits but that fail before producing any assistant message has no assistant boundary, so those acknowledged user messages can remain in the outgoing tail. The Gateway still deduplicates them by ID; a fully bounded version of that rare failure path would require an explicit acknowledgement cursor.
 
 If the model calls a browser-owned Tool, the current HTTP run finishes successfully while the DSH Tool Promise remains pending. The browser executes the Tool, appends one standard AG-UI ToolMessage with the same `toolCallId`, and starts another run. The Gateway resolves the original Promise and continues the same DSH turn.
 
@@ -360,6 +365,7 @@ An unexpected HTTP disconnect cancels the Gateway-owned DSH turn. `HttpAgent` do
 | Component | Supported version |
 | --- | --- |
 | AG-UI core/client/encoder | `>=0.0.58 <0.1.0` (`~0.0.59`; tested with `0.0.59`) |
+| `dsh-ag-ui/client` companion | `@ag-ui/client ~0.0.59` |
 | Node.js | `^22.19.0` or `>=24.0.0` |
 | DeepSeek Harness | `0.1.5-alpha.1` (exact developer-preview peers) |
 
