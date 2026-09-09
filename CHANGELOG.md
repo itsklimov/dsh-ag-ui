@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- A `dsh-ag-ui/client` companion whose `DshHttpAgent` sends only messages relevant to the stateful Gateway's next admission while retaining full client history.
 - Bidirectional shared state with `STATE_SNAPSHOT` and the reserved `ag_ui_update_state` Tool.
 - Dojo-compatible keyless examples for chat, backend Tools, shared state, HITL, and tool-based generative UI.
 
