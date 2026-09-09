@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Native root-Agent questions and one-shot approvals over AG-UI interrupt outcomes and `resume[]`, with bounded waits, readonly reconnect and atomic continuation admission.
+
 - Bidirectional shared state with `STATE_SNAPSHOT` and the reserved `ag_ui_update_state` Tool.
 - Dojo-compatible keyless examples for chat, backend Tools, shared state, HITL, and tool-based generative UI.
 
