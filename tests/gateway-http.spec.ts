@@ -133,6 +133,7 @@ describe('AG-UI configuration', () => {
     [{ userHeader: 'bad_header' }, 'identity header names'],
     [{ sharedSecret: 'short' }, 'at least 16 UTF-8 bytes'],
     [{ humanInteractionTimeoutMs: 0 }, 'humanInteractionTimeoutMs must be positive'],
+    [{ humanInteractionTimeoutMs: 2_147_483_648 }, 'humanInteractionTimeoutMs must not exceed 2147483647'],
     [{ maxPendingInterrupts: Number.MAX_SAFE_INTEGER + 1 }, 'maxPendingInterrupts must be a finite positive integer'],
     [{ maxThreads: 0 }, 'maxThreads must be positive'],
     [{ threadIdleMs: 0 }, 'threadIdleMs must be positive'],
@@ -140,6 +141,10 @@ describe('AG-UI configuration', () => {
     [{ maxRunEventBytes: 1 }, 'maxRunEventBytes cannot retain mandatory opening and terminal events'],
   ] as const)('rejects invalid configuration %#', async (overrides, message) => {
     await expect(mount(overrides)).rejects.toThrow(message)
+  })
+
+  it.each([1, 2_147_483_647])('accepts a human request timeout at the supported boundary: %s', async (humanInteractionTimeoutMs) => {
+    await expect(mount({ humanInteractionTimeoutMs })).resolves.toHaveProperty('gateway')
   })
 
   it('requires explicit permission for a non-loopback bind', async () => {

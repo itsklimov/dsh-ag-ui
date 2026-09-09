@@ -126,7 +126,7 @@ A later Profile patch replaces the bundle row's complete `config`; include every
 | `maxThreads` | `100` | Maximum process-local live threads |
 | `threadIdleMs` | `1800000` | Idle thread lifetime |
 | `frontendToolTimeoutMs` | `300000` | Maximum browser Tool result wait |
-| `humanInteractionTimeoutMs` | `300000` | Maximum wait for each native human request |
+| `humanInteractionTimeoutMs` | `300000` | Maximum wait for each native human request; integer from 1 to 2147483647 ms |
 | `maxPendingInterrupts` | `16` | Maximum live human requests per thread |
 | `maxRunEvents` | `4096` | Maximum events retained per run |
 | `maxRunEventBytes` | `2097152` | Maximum retained event bytes per run |

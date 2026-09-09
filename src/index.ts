@@ -367,6 +367,9 @@ function assertConfig(ctx: Context, config: Required<Config>): void {
   for (const name of ['humanInteractionTimeoutMs', 'maxPendingInterrupts'] as const) {
     if (!Number.isSafeInteger(config[name])) throw new Error(`ag-ui: ${name} must be a finite positive integer`)
   }
+  if (config.humanInteractionTimeoutMs > 2_147_483_647) {
+    throw new Error('ag-ui: humanInteractionTimeoutMs must not exceed 2147483647 (the Node.js timer limit)')
+  }
   if (config.maxRunEvents < 2) throw new Error('ag-ui: maxRunEvents must retain opening and terminal events')
   const longestId = 'x'.repeat(config.maxIdentityBytes)
   const opening = {
