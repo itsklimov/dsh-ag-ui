@@ -283,6 +283,9 @@ export class ThreadBinding {
             await this.preparePreset(input, false)
             if (signal.aborted) throw disconnected
             this.assertLive()
+            // Native selection can replace the inherited Tool names while admission awaits.
+            this.assertStateToolAvailable(this.prepareSharedState(input))
+            this.prepareFrontendTools(input.tools)
             return controller
           } catch (error) {
             // A rejected HTTP admission never becomes a replayable SSE run.

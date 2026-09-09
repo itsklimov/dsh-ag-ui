@@ -135,7 +135,7 @@ lease.dispose()
 
 同一租户需要多个 preset 时，宿主可配置 `selectableAgentPresets: { "tenant-1": ["alpha", "beta"] }` 授予选择权限。run 随后可通过 `forwardedProps: { agentPreset: "beta" }` 请求选择。Gateway 在激活时对照 roster 验证授权列表，并在线程的 run reservation 内调用原生 `agentPresets.select`，在首个 turn 前完成选择。roster 本身不授予权限；BFF 仍需认证租户并授权用户访问应用功能。
 
-选择是可选的。省略该字段会保留当前组合；重复当前生效的规范 id 不做任何更改，重启后也一样。不同且未授权的 id 返回 HTTP 403 `PRESET_NOT_ALLOWED`；首个 turn 开始后请求切换到已授权的其他 id 返回 HTTP 409 `PRESET_LOCKED`。仅同步历史的请求不会选择 preset，因此由历史读取创建的 session 仍可在首个工作 run 中选择。原生 session 日志记录实际组合，并在重启后恢复。若选择成功后 Tool 验证拒绝 run 或客户端断开，已记录的选择会保留；用户 turn 不会启动，空白 session 仍可再次选择。
+选择是可选的。省略该字段会保留当前组合；重复当前生效的规范 id 不做任何更改，重启后也一样。不同且未授权的 id 返回 HTTP 403 `PRESET_NOT_ALLOWED`；首个 turn 开始后请求切换到已授权的其他 id 返回 HTTP 409 `PRESET_LOCKED`。仅同步历史的请求不会选择 preset，因此由历史读取创建的 session 仍可在首个工作 run 中选择。原生 session 日志记录实际组合，并在重启后恢复。Gateway 在 SSE 开始前根据所选组合验证 Tool 名称。若选择成功后该验证拒绝 run 或客户端断开，已记录的选择会保留；用户 turn 不会启动，空白 session 仍可再次选择。
 
 
 `maxRunEvents` 必须至少容纳 mandatory opening 与 terminal events。`maxRunEventBytes` 会限制包含 `RUN_STARTED` 和 terminal event 在内的完整 retained Run record，并且必须足以容纳已配置的最大 identity length。非 loopback DSH WebServer 需要设置 `allowNonLoopback: true`。推荐把 Gateway 保持在 loopback，并放在同 Host 的 authenticated BFF 后面。

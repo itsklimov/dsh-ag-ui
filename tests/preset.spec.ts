@@ -343,6 +343,42 @@ describe('thread preset selection', () => {
     expect(sessionPresetOf(ctx.agents.list()[0]!.session)).toBe('alpha')
   })
 
+  it('rejects a Tool collision in the selected preset before SSE and lets the same run retry', async () => {
+    const { url, ctx, adapter } = await mount({ selectableAgentPresets: { 'tenant-1': ['beta'] } })
+    const request: RunAgentInput = {
+      threadId: 'selected-collision', runId: 'retry', messages: [{ id: 'user', role: 'user', content: 'Hello.' }],
+      tools: [{ name: 'preset_beta_probe', description: 'Conflicting browser tool', parameters: { type: 'object', properties: {} } }],
+      context: [], state: {}, forwardedProps: { agentPreset: 'beta' },
+    }
+    const send = (value: RunAgentInput) => fetch(url, { method: 'POST', headers: {
+      authorization: `Bearer ${SECRET}`, 'x-dsh-tenant-id': 'tenant-1', 'x-dsh-user-id': 'user-1', 'content-type': 'application/json',
+    }, body: JSON.stringify(value) })
+    const rejected = await send(request)
+    expect(rejected.status).toBe(409)
+    expect(await rejected.json()).toMatchObject({ code: 'FRONTEND_TOOL_NAME_COLLISION' })
+    expect(sessionPresetOf(ctx.agents.list()[0]!.session)).toBe('beta')
+    expect(adapter.requests).toHaveLength(0)
+    const retry = await send({ ...request, tools: [] })
+    expect(retry.status).toBe(200)
+    expect(await retry.text()).toContain('RUN_FINISHED')
+    expect(adapter.requests).toHaveLength(1)
+  })
+
+  it('validates browser Tools against the selected composition instead of the previous preset', async () => {
+    const { url, ctx, adapter } = await mount({ selectableAgentPresets: { 'tenant-1': ['beta'] } })
+    const response = await fetch(url, { method: 'POST', headers: {
+      authorization: `Bearer ${SECRET}`, 'x-dsh-tenant-id': 'tenant-1', 'x-dsh-user-id': 'user-1', 'content-type': 'application/json',
+    }, body: JSON.stringify({
+      threadId: 'previous-collision', runId: 'first', messages: [{ id: 'user', role: 'user', content: 'Hello.' }],
+      tools: [{ name: 'preset_alpha_probe', description: 'Browser tool', parameters: { type: 'object', properties: {} } }],
+      context: [], state: {}, forwardedProps: { agentPreset: 'beta' },
+    }) })
+    expect(response.status).toBe(200)
+    expect(await response.text()).toContain('RUN_FINISHED')
+    expect(sessionPresetOf(ctx.agents.list()[0]!.session)).toBe('beta')
+    expect(adapter.requests).toHaveLength(1)
+  })
+
   it('holds the admission reservation across native selection and refuses a competing change', async () => {
     const { url, ctx } = await mount({ selectableAgentPresets: { 'tenant-1': ['alpha', 'beta'] } }, [textResponse('beta won.')])
     const entered = Promise.withResolvers<void>()
