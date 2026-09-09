@@ -28,7 +28,7 @@ const sessionId = SessionId('ag-ui-projection-test')
 const messageId = 'ag-ui:ag-ui-projection-test:1:1:assistant'
 
 function event(type: string, data: unknown): SessionEvent {
-  return { type, seq: 0, time: 0, data } as unknown as SessionEvent
+  return { type, seq: 0, time: 0, data, ...(['system/message', 'user/message', 'assistant/message', 'tool/result'].includes(type) ? { surfaceOp: 'append' } : {}) } as unknown as SessionEvent
 }
 
 function textMessage(text: string): SessionEvent {
@@ -333,6 +333,18 @@ describe('SessionProjection tool view cards', () => {
     }])
   })
 
+  it('retains original transcript cards and excludes model-only surface replacements', () => {
+    const projection = new SessionProjection(sessionId, declaring)
+    const original = toolResult('retained')
+    const replacement = { ...toolResult('retained'), surfaceOp: { op: 'replace', startSeq: 1, endSeq: 1 } } as SessionEvent
+    const log = [toolCall('retained', 'view_tool'), original, replacement]
+    expect(projection.toolViewEvents(log)).toEqual(projection.toolViewEvents(log.slice(0, 2)))
+    expect(projection.toolViewEvents(log)).toHaveLength(1)
+    const transcript = [textMessage('original visible answer'), { ...textMessage('model-only compaction'), surfaceOp: { op: 'replace', startSeq: 0, endSeq: 0 } } as SessionEvent]
+    expect(projection.messagesSnapshot(transcript, () => undefined)).toEqual([{ id: messageId, role: 'assistant', content: 'original visible answer' }])
+    expect(projection.messagesSnapshot(log, () => undefined)).toHaveLength(1)
+  })
+
   it('skips a durable result whose call event is absent', () => {
     const projection = new SessionProjection(sessionId, declaring)
     expect(projection.toolViewEvents([toolResult('orphan')])).toEqual([])
@@ -376,7 +388,7 @@ describe('SessionProjection shared state', () => {
 })
 
 describe('SessionProjection history snapshot', () => {
-  it('derives the full history, skipping injected context, unmapped ids, and empty text', () => {
+  it('derives the full history, including tool-only assistant messages in durable order', () => {
     const projection = new SessionProjection(sessionId, presenter)
     const events = [
       event('user/message', {
@@ -396,12 +408,74 @@ describe('SessionProjection history snapshot', () => {
       }),
       textMessage(''),
       textMessage('hello back'),
+      event('assistant/message', {
+        turn: 1,
+        step: 2,
+        message: createAssistantMessage({
+          content: [
+            { type: 'text', text: 'I will render it.' },
+            {
+              type: 'tool-call',
+              id: ToolCallId('call-1'),
+              name: 'render_a2ui',
+              arguments: '{"surfaceId":"overview","components":[]}',
+            },
+          ],
+          source: { provider: 'scripted', model: 'scripted' },
+        }),
+      }),
       toolResult('call-1'),
     ]
     expect(projection.messagesSnapshot(events, id => (id === 'user-1' ? 'client-user-1' : undefined))).toEqual([
       { id: 'client-user-1', role: 'user', content: 'hello' },
       { id: messageId, role: 'assistant', content: 'hello back' },
-      { id: 'ag-ui:ag-ui-projection-test:call-1:result', role: 'tool', toolCallId: 'call-1', content: 'result of call-1' },
+      {
+        id: 'ag-ui:ag-ui-projection-test:1:2:assistant',
+        role: 'assistant',
+        content: 'I will render it.',
+        toolCalls: [{
+          id: 'call-1',
+          type: 'function',
+          function: {
+            name: 'render_a2ui',
+            arguments: '{"surfaceId":"overview","components":[]}',
+          },
+        }],
+      },
+      {
+        id: 'ag-ui:ag-ui-projection-test:call-1:result',
+        role: 'tool',
+        toolCallId: 'call-1',
+        content: 'result of call-1',
+      },
+    ])
+  })
+
+  it('gives an empty failed durable tool result an explicit error', () => {
+    const projection = new SessionProjection(sessionId, presenter)
+    expect(projection.messagesSnapshot([event('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: ToolCallId('empty-failure'), isError: true, content: [] }) })], () => undefined)).toMatchObject([{ role: 'tool', error: 'Tool execution failed' }])
+  })
+
+  it('keeps a tool-only assistant message so its result is never orphaned', () => {
+    const projection = new SessionProjection(sessionId, presenter)
+    const announcement = assistantToolAnnouncement(1, 1)
+
+    expect(projection.messagesSnapshot([announcement, toolResult('announced-0')], () => undefined)).toEqual([
+      {
+        id: messageId,
+        role: 'assistant',
+        toolCalls: [{
+          id: 'announced-0',
+          type: 'function',
+          function: { name: 'ui_action', arguments: '{}' },
+        }],
+      },
+      {
+        id: 'ag-ui:ag-ui-projection-test:announced-0:result',
+        role: 'tool',
+        toolCallId: 'announced-0',
+        content: 'result of announced-0',
+      },
     ])
   })
 })
