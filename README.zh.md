@@ -15,7 +15,7 @@
 - 通过 `ctx.agUi` 暴露的标准 Cordis `Service` 插件
 - 通过 `ctx.browserTools` 暴露的传输无关 Agent-scoped browser Tool broker
 - 可使用 `dsh plugin add` 安装的 DSH Profile Bundle
-- 下限式 AG-UI 协议范围（`~0.0.58`）
+- 下限式 AG-UI 协议范围（`~0.0.59`）
 - 使用可信 tenant/user headers 的 BFF-to-Gateway 认证
 - `(tenantId, userId, threadId)` 到 DSH Agent 的进程内绑定
 - AG-UI 文本流与 backend Tool result 投影
@@ -307,6 +307,7 @@ Upstream Dojo 的 integration registry 是静态源码，目前没有 `deepseek-
 - Request 必须为 `POST application/json`，并且符合 AG-UI `RunAgentInput`。
 - 普通 run 接受一条或多条新的文本 user message，它们按到达顺序进入同一个 DSH turn。没有新消息的 run 只返回历史 snapshot，不会在活跃 run 后面等待。
 - Continuation 接受属于一个 pending DSH turn 的一条或多条新 frontend ToolMessages。
+- 已认证 pending frontend Tool result 上的标准对象 metadata 会通过原生 DSH presentation metadata 持久化，并由后续 message snapshot 返回；没有 metadata 的结果在 wire 上保持不变。
 - 一个 DSH turn 可以跨多个 AG-UI HTTP runs。
 - 每个 run 发出一个 `RUN_STARTED` 和恰好一个 `RUN_FINISHED` 或 `RUN_ERROR`。
 - `runId` 是 exact-request idempotency key。已完成的相同 request 会重放 retained events，不再次驱动 DSH。
@@ -359,7 +360,7 @@ Backend Tool result 会发出 `TOOL_CALL_RESULT`。Frontend Tool result 不在 A
 
 | 组件 | 支持版本 |
 | --- | --- |
-| AG-UI core/client/encoder | `>=0.0.58 <0.1.0`（`~0.0.58`；已用 `0.0.58` 验证） |
+| AG-UI core/client/encoder | `>=0.0.58 <0.1.0`（`~0.0.59`；已用 `0.0.59` 验证） |
 | Node.js | `^22.19.0` 或 `>=24.0.0` |
 | DeepSeek Harness | `0.1.5-alpha.1`（精确的 developer-preview peers） |
 
