@@ -1,3 +1,4 @@
+import { A2UIMiddleware } from '@ag-ui/a2ui-middleware'
 import {
   EventType,
   RunAgentInputSchema,
@@ -72,10 +73,57 @@ describe('prepareDshRunInput', () => {
     expect(prepareDshRunInput(input(messages)).messages).toEqual(messages.slice(1))
     expect(prepareDshRunInput(input([])).messages).toEqual([])
   })
+
+  it('preserves the exact final A2UI pair and any preceding frontend result', () => {
+    const action = {
+      a2uiAction: {
+        userAction: { name: 'approve', surfaceId: 'review', context: { version: 2 } },
+      },
+    }
+    const pair: Message[] = [
+      {
+        id: 'action-assistant',
+        role: 'assistant',
+        content: '',
+        toolCalls: [{
+          id: 'action-call',
+          type: 'function',
+          function: { name: 'log_a2ui_event', arguments: JSON.stringify(action.a2uiAction.userAction) },
+        }],
+      },
+      tool('action-result', 'action-call', 'User performed action'),
+    ]
+    const pending = tool('pending-result', 'pending-call')
+    const messages = [
+      user('old-user', 'old'),
+      assistant('old-assistant', 'done'),
+      {
+        id: 'pending-assistant',
+        role: 'assistant' as const,
+        content: '',
+        toolCalls: [{
+          id: 'pending-call',
+          type: 'function' as const,
+          function: { name: 'render_a2ui', arguments: '{}' },
+        }],
+      },
+      pending,
+      ...pair,
+    ]
+
+    expect(prepareDshRunInput(input(messages, action)).messages).toEqual([pending, ...pair])
+  })
+
+  it('passes malformed action tails through for gateway validation', () => {
+    const onlyMessage = user('malformed', 'not a synthetic pair')
+
+    expect(prepareDshRunInput(input([onlyMessage], { a2uiAction: null })).messages).toEqual([onlyMessage])
+    expect(prepareDshRunInput(input([onlyMessage], null)).messages).toEqual([onlyMessage])
+  })
 })
 
 describe('DshHttpAgent', () => {
-  it('narrows the wire input and survives cloning', async () => {
+  it('applies the selector after official middleware and survives cloning', async () => {
     const requests: RunAgentInput[] = []
     const upstreamFetch: HttpAgentFetchFn = async (_url, init) => {
       const request = RunAgentInputSchema.parse(JSON.parse(String(init.body)))
@@ -91,20 +139,33 @@ describe('DshHttpAgent', () => {
     const fullHistory = [
       user('large-old-user', 'x'.repeat(300_000)),
       assistant('settled-assistant', 'settled'),
-      user('new-user', 'next'),
     ]
     const agent = new DshHttpAgent({
       url: 'http://gateway.internal/ag-ui',
       fetch: upstreamFetch,
       threadId: 'client-thread',
       initialMessages: fullHistory,
-    }).clone()
+    }).use(new A2UIMiddleware({ injectA2UITool: true })).clone()
 
-    await agent.runAgent({ runId: 'client-run' })
+    await agent.runAgent({
+      runId: 'client-run',
+      forwardedProps: {
+        a2uiAction: {
+          userAction: { name: 'approve', surfaceId: 'review', context: { version: 2 } },
+        },
+      },
+    })
 
     expect(agent).toBeInstanceOf(DshHttpAgent)
     expect(agent.messages).toEqual(fullHistory)
     expect(requests).toHaveLength(1)
-    expect(requests[0]?.messages).toEqual([fullHistory[2]])
+    expect(requests[0]?.messages).toHaveLength(2)
+    expect(requests[0]?.messages[0]).toMatchObject({
+      role: 'assistant',
+      content: '',
+      toolCalls: [{ function: { name: 'log_a2ui_event' } }],
+    })
+    expect(requests[0]?.messages[1]).toMatchObject({ role: 'tool' })
+    expect(requests[0]?.tools.map(item => item.name)).toEqual(['render_a2ui'])
   })
 })
