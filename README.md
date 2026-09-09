@@ -15,7 +15,7 @@ A community [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 
 - Standard Cordis `Service` plugin exposed as `ctx.agUi`
 - Transport-neutral Agent-scoped browser Tool broker exposed as `ctx.browserTools`
 - Installable DSH Profile Bundle through `dsh plugin add`
-- Floored AG-UI protocol range (`~0.0.58`)
+- Floored AG-UI protocol range (`~0.0.59`)
 - Authenticated BFF-to-Gateway requests with trusted tenant and user headers
 - Process-local `(tenantId, userId, threadId)` bindings to DSH Agents
 - AG-UI text streaming and backend Tool result projection
@@ -307,6 +307,7 @@ The separate [`dsh-ag-ui-adapter`](packages/dsh-ag-ui-adapter) package is the em
 - Requests must be `POST application/json` and match AG-UI `RunAgentInput`.
 - A normal run accepts one or more new text user messages; they join one DSH turn in arrival order. A run without new messages only returns the history snapshot; it never waits behind an active run.
 - A continuation accepts one or more new frontend ToolMessages for one pending DSH turn.
+- Standard object metadata on an authenticated pending frontend Tool result is persisted through native DSH presentation metadata and returned by later message snapshots; results without metadata remain unchanged on the wire.
 - One DSH turn can cross multiple AG-UI HTTP runs.
 - Each run emits one `RUN_STARTED` and exactly one `RUN_FINISHED` or `RUN_ERROR`.
 - `runId` is an exact-request idempotency key. Completed identical requests replay retained events without driving DSH again.
@@ -358,7 +359,7 @@ An unexpected HTTP disconnect cancels the Gateway-owned DSH turn. `HttpAgent` do
 
 | Component | Supported version |
 | --- | --- |
-| AG-UI core/client/encoder | `>=0.0.58 <0.1.0` (`~0.0.58`; tested with `0.0.58`) |
+| AG-UI core/client/encoder | `>=0.0.58 <0.1.0` (`~0.0.59`; tested with `0.0.59`) |
 | Node.js | `^22.19.0` or `>=24.0.0` |
 | DeepSeek Harness | `0.1.5-alpha.1` (exact developer-preview peers) |
 
