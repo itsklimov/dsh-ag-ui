@@ -126,7 +126,7 @@ lease.dispose()
 | `maxThreads` | `100` | 最大进程内 live threads |
 | `threadIdleMs` | `1800000` | Idle thread lifetime |
 | `frontendToolTimeoutMs` | `300000` | Browser Tool result 最大等待时间 |
-| `humanInteractionTimeoutMs` | `300000` | 每个原生人工请求的最大等待时间 |
+| `humanInteractionTimeoutMs` | `300000` | 每个原生人工请求的最大等待时间；1 至 2147483647 的整数（毫秒） |
 | `maxPendingInterrupts` | `16` | 每个 thread 的最大待处理人工请求数 |
 | `maxRunEvents` | `4096` | 每个 run 最大保留 events |
 | `maxRunEventBytes` | `2097152` | 每个 run 最大保留 event bytes |
