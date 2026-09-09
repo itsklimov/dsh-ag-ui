@@ -250,6 +250,8 @@ await agent.runAgent({
 
 官方 `@ag-ui/a2ui-middleware` 使用同一套原生 contract。middleware 直接根据流式 Tool 参数渲染，从不发送浏览器 result，因此 Gateway 不会 park 它在 `forwardedProps.injectA2UITool` 中标记的 render Tool：该调用立即以 `{"status":"rendered"}` 结算，result 在同一个 run 内流出，DSH turn 继续执行。客户端自行注册的 render Tool 仍像其他浏览器 Tool 一样 park。之后的 `forwardedProps.a2uiAction` 会作为 durable plugin context 开启下一个 turn。该 context 同时保留可读的 middleware result 与完整、已校验的 action JSON（包括可选 timestamp），并递归排序对象键。Gateway 只接受 middleware 的精确有界 action envelope，以及末尾匹配的 `log_a2ui_event` assistant/Tool pair；它不会把任意 assistant history 导入 DSH。
 
+Synthetic result message ID 在原生 inbox 与持久化日志中标识该 action。同一对已生成的 messages 在不同 HTTP run ID 或重启后重试时保持幂等；同一 identity 携带不同 action 内容会被拒绝。每次新点击必须使用新的 result ID，即使 payload 与之前相同。Middleware 重试必须保留已生成的 pair identities。
+
 普通 browser Tool result 不要通过 AG-UI `resume[]` 发送；该字段保留给显式 interrupt/HITL flow。
 
 ## Shared state

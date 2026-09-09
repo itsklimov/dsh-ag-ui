@@ -3,9 +3,8 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { A2UIMiddleware, RENDER_A2UI_TOOL, RENDER_A2UI_TOOL_NAME, type A2UIUserAction } from '@ag-ui/a2ui-middleware'
-import { HttpAgent } from '@ag-ui/client'
+import { HttpAgent, RunAgentInputSchema, type RunAgentInput } from '@ag-ui/client'
 import { EventType, type BaseEvent, type Tool } from '@ag-ui/core'
-import { DshHttpAgent } from '../src/client.ts'
 import { disposeMountedContexts, mountGateway, runAgentEvents } from './harness.ts'
 import { textResponse, toolResponse } from './scripted-adapter.ts'
 
@@ -53,7 +52,7 @@ describe('official A2UI middleware contract', () => {
       textResponse('The overview is ready.'),
       textResponse('The refresh action was handled.'),
     ], SECRET)
-    const agent = new DshHttpAgent({ url: harness.url, headers: HEADERS, threadId: 'a2ui-thread' })
+    const agent = new HttpAgent({ url: harness.url, headers: HEADERS, threadId: 'a2ui-thread' })
       .use(new A2UIMiddleware({ injectA2UITool: true, defaultCatalogId: 'catalog.test' }))
     agent.addMessage({ id: 'a2ui-user-1', role: 'user', content: 'Render an overview.' })
 
@@ -157,6 +156,43 @@ describe('official A2UI middleware contract', () => {
 
     expect(events.at(-1)).toMatchObject({ type: EventType.RUN_FINISHED })
     expect(harness.adapter.requests).toHaveLength(1)
+  })
+
+  it.each([false, true])('deduplicates an action delivery across HTTP runs, restart=%s', async (restart) => {
+    const persistenceRoot = await mkdtemp(join(tmpdir(), 'ag-ui-a2ui-retry-'))
+    roots.push(persistenceRoot)
+    let harness = await mountGateway([textResponse('Action handled.'), textResponse('New click handled.')], SECRET, { persistenceRoot })
+    let formed: RunAgentInput | undefined
+    const agent = new HttpAgent({
+      url: harness.url, headers: HEADERS, threadId: 'action-retry',
+      fetch: async (url, init) => {
+        formed = RunAgentInputSchema.parse(JSON.parse(String(init.body)))
+        return fetch(url, init)
+      },
+    }).use(new A2UIMiddleware({ injectA2UITool: true }))
+    const action = { name: 'approve', surfaceId: 'review', timestamp: '2026-09-09T00:00:00Z' }
+    expect((await runWithAction(agent, 'action-first', action)).at(-1)).toMatchObject({ type: EventType.RUN_FINISHED })
+    if (formed === undefined) throw new Error('Expected the middleware request')
+    if (restart) {
+      await harness.ctx.fiber.dispose()
+      harness = await mountGateway([textResponse('New click handled.')], SECRET, { persistenceRoot })
+    }
+    const before = harness.adapter.requests.length
+    const retry = new HttpAgent({ url: harness.url, headers: HEADERS, threadId: 'action-retry', initialMessages: formed.messages })
+    expect((await runWithAction(retry, 'action-retry-run', action, formed.tools)).at(-1)).toMatchObject({ type: EventType.RUN_FINISHED })
+    expect(harness.adapter.requests).toHaveLength(before)
+
+    retry.setMessages(formed.messages.map(message => message.role === 'assistant'
+      ? { ...message, toolCalls: message.toolCalls?.map(call => ({ ...call, function: { ...call.function, arguments: JSON.stringify({ ...action, timestamp: 'changed' }) } })) }
+      : message))
+    expect((await runWithAction(retry, 'action-conflict', { ...action, timestamp: 'changed' }, formed.tools)).at(-1))
+      .toMatchObject({ type: EventType.RUN_ERROR, code: 'MESSAGE_ID_CONFLICT' })
+    expect(harness.adapter.requests).toHaveLength(before)
+
+    const nextClick = new HttpAgent({ url: harness.url, headers: HEADERS, threadId: 'action-retry' })
+      .use(new A2UIMiddleware({ injectA2UITool: true }))
+    expect((await runWithAction(nextClick, 'action-new-click', action)).at(-1)).toMatchObject({ type: EventType.RUN_FINISHED })
+    expect(harness.adapter.requests).toHaveLength(before + 1)
   })
 
   it('accepts the native middleware pair and stores unsorted nested context canonically', async () => {
