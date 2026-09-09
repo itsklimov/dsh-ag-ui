@@ -217,7 +217,7 @@ The Gateway wire protocol accepts official clients in the supported range (`>=0.
 pnpm add dsh-ag-ui @ag-ui/client@~0.0.59
 ```
 
-Use the Gateway-owned client companion so long conversations do not resend their settled transcript. The agent still retains its complete local history for rendering and middleware; only the HTTP input is narrowed to user and Tool messages after the last assistant boundary.
+The optional Gateway-owned client companion omits presentation messages from HTTP input while retaining every user and Tool message. It preserves the final synthetic pair added by A2UI middleware. The agent keeps its complete local history for rendering and middleware; standard `HttpAgent` with full history is also supported.
 
 Send page-specific browser Tools and current context on every run:
 
@@ -247,7 +247,7 @@ await agent.runAgent({
 })
 ```
 
-This stateless selection preserves rejected pre-admission messages. A sequence of runs that the Gateway admits but that fail before producing any assistant message has no assistant boundary, so those acknowledged user messages can remain in the outgoing tail. The Gateway still deduplicates them by ID; a fully bounded version of that rare failure path would require an explicit acknowledgement cursor.
+Assistant messages do not acknowledge earlier input, so the companion never discards user messages based on their position. The Gateway deduplicates accepted messages by ID. Large user and Tool histories still count toward the configured HTTP request-body limit; this companion does not guarantee bounded request size.
 
 If the model calls a browser-owned Tool, the current HTTP run finishes successfully while the DSH Tool Promise remains pending. The browser executes the Tool, appends one standard AG-UI ToolMessage with the same `toolCallId`, and starts another run. The Gateway resolves the original Promise and continues the same DSH turn.
 

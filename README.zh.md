@@ -217,7 +217,7 @@ Gateway wire protocol 接受支持范围（`>=0.0.58 <0.1.0`）内的官方 clie
 pnpm add dsh-ag-ui @ag-ui/client@~0.0.59
 ```
 
-使用 gateway 自己提供的 client companion，避免长对话反复发送已完成的 transcript。Agent 仍保留完整本地 history，供渲染器与 middleware 使用；只有 HTTP input 会缩减为最后一个 assistant boundary 之后的 user 与 Tool messages。
+可选的 Gateway client companion 从 HTTP input 中省略展示消息，同时保留所有 user 与 Tool messages，以及 A2UI middleware 添加的最后一对 synthetic messages。Agent 仍保留完整本地 history，供渲染器与 middleware 使用；标准 `HttpAgent` 也可以直接发送完整 history。
 
 在每个 run 中发送页面相关的 browser Tools 与当前 context：
 
@@ -247,7 +247,7 @@ await agent.runAgent({
 })
 ```
 
-该 stateless 选择会保留 admission 前被拒绝的 messages。如果一连串 run 已被 Gateway 接受、却都在产生 assistant message 前失败，client 就没有 assistant boundary 可用，这些已确认的 user messages 仍可能留在 outgoing tail 中。Gateway 会继续按 ID 去重；若要让这个少见的 failure path 也严格 bounded，需要新增显式 acknowledgement cursor。
+Assistant messages 不能确认此前的 input 已被接受，因此 companion 不会根据位置丢弃 user messages。Gateway 按 ID 去重已接受的 messages。大量 user 与 Tool history 仍计入配置的 HTTP request-body limit；companion 不保证请求大小有界。
 
 模型调用 browser-owned Tool 时，当前 HTTP run 成功结束，但 DSH Tool Promise 仍然 pending。浏览器执行 Tool、追加一条使用相同 `toolCallId` 的标准 AG-UI ToolMessage，再开始另一个 run。Gateway resolve 原始 Promise，并继续同一个 DSH turn。
 
