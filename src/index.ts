@@ -39,6 +39,8 @@ export interface Config {
   agentPreset?: string
   /** Per-tenant preset ids taking precedence over {@link Config.agentPreset}. */
   tenantPresets?: Record<string, string>
+  /** Presets each authenticated tenant may select for a blank thread. No grants by default. */
+  selectableAgentPresets?: Record<string, string[]>
   /** Bearer secret shared only with the trusted BFF. */
   sharedSecret: string
   /** Header carrying the BFF-authenticated tenant id. */
@@ -90,6 +92,7 @@ export const Config: z<Config> = z.object({
   model: z.string().required(),
   agentPreset: z.string(),
   tenantPresets: z.dict(z.string()),
+  selectableAgentPresets: z.dict(z.array(z.string())),
   sharedSecret: z.string().required(),
   tenantHeader: z.string().default('x-dsh-tenant-id'),
   userHeader: z.string().default('x-dsh-user-id'),
@@ -132,6 +135,7 @@ export class AgUiGateway extends Service implements AgUiAgentLookup {
   private defaultPresetId: string | undefined
   /** Canonical preset ids per configured tenant, resolved when activation validated them. */
   private readonly tenantPresetIds = new Map<string, string>()
+  private readonly selectablePresetIds = new Map<string, ReadonlySet<string>>()
 
   /**
    * Register the route and own every Agent created through it.
@@ -162,8 +166,9 @@ export class AgUiGateway extends Service implements AgUiAgentLookup {
   async [Service.init](): Promise<void> {
     const presets = agentPresetsOf(this.ctx)
     const overrides = Object.entries(this.resolved.tenantPresets)
+    const selectable = Object.entries(this.resolved.selectableAgentPresets)
     if (presets === undefined) {
-      if (this.resolved.agentPreset === undefined && overrides.length === 0) return
+      if (this.resolved.agentPreset === undefined && overrides.length === 0 && selectable.length === 0) return
       throw new Error('ag-ui: agentPreset is configured but no agent-presets roster is mounted; mount the roster before this Gateway')
     }
     if (this.resolved.agentPreset !== undefined) {
@@ -171,6 +176,9 @@ export class AgUiGateway extends Service implements AgUiAgentLookup {
     }
     for (const [tenantId, presetId] of overrides) {
       this.tenantPresetIds.set(tenantId, (await presets.resolve(presetId)).id)
+    }
+    for (const [tenantId, ids] of selectable) {
+      this.selectablePresetIds.set(tenantId, new Set(await Promise.all(ids.map(async id => (await presets.resolve(id)).id))))
     }
   }
 
@@ -284,6 +292,7 @@ export class AgUiGateway extends Service implements AgUiAgentLookup {
       provider: this.resolved.provider,
       model: this.resolved.model,
       ...(presetId === undefined ? {} : { presetId }),
+      selectablePresetIds: this.selectablePresetIds.get(principal.tenantId) ?? new Set(),
       frontendToolTimeoutMs: this.resolved.frontendToolTimeoutMs,
       threadIdleMs: this.resolved.threadIdleMs,
       maxRunEvents: this.resolved.maxRunEvents,

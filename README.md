@@ -108,6 +108,7 @@ A later Profile patch replaces the bundle row's complete `config`; include every
 | `model` | required | Model ID owned by the provider |
 | `agentPreset` | none | Deployment-default agent preset id composed into every thread |
 | `tenantPresets` | `{}` | Per-tenant preset ids taking precedence over `agentPreset` |
+| `selectableAgentPresets` | `{}` | Canonical preset ids each authenticated tenant may select for a blank thread |
 | `sharedSecret` | required | Bearer secret shared only with the trusted BFF |
 | `tenantHeader` | `x-dsh-tenant-id` | Trusted tenant identity header |
 | `userHeader` | `x-dsh-user-id` | Trusted user identity header |
@@ -131,6 +132,11 @@ A later Profile patch replaces the bundle row's complete `config`; include every
 | `maxRunsPerThread` | `32` | Maximum retained run ledger entries and, separately, waiting requests per thread |
 
 `agentPreset` composes each thread's agent from the host's agent-presets roster (mount the roster plugin before this Gateway); an unresolvable id fails Gateway activation loudly, a per-tenant entry overrides the deployment default for that tenant's threads, and a resumed thread keeps the composition its own durable session recorded. Without `agentPreset`, threads keep the host composition unchanged.
+
+For multiple presets within one tenant, the host can grant selection with `selectableAgentPresets: { "tenant-1": ["alpha", "beta"] }`. A run may then request `forwardedProps: { agentPreset: "beta" }`. The Gateway validates grants against the roster at activation and calls native `agentPresets.select` under the thread's run reservation before its first turn. The roster alone grants no authority, and the BFF must still authenticate the tenant and authorize access to its application features.
+
+Selection is optional. Omitting it preserves the current composition; repeating the effective canonical id is a no-op, including after restart. A different ungranted id fails with HTTP 403 `PRESET_NOT_ALLOWED`; a granted change after the first turn fails with HTTP 409 `PRESET_LOCKED`. A history-only request never selects a preset, so a session created by a history read can still choose one on its first work run. The native session log owns the selected composition and restores it after restart. A successful selection remains recorded if later Tool validation rejects the run or its client disconnects; no user turn is started, and the blank session can select again.
+
 
 `maxRunEvents` must retain at least the mandatory opening and terminal events. `maxRunEventBytes` bounds the complete retained Run record, including `RUN_STARTED` and its terminal event, and must be large enough for the configured maximum identity length. A non-loopback DSH WebServer requires `allowNonLoopback: true`. Prefer a loopback Gateway behind a same-host authenticated BFF.
 
