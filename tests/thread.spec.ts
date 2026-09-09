@@ -145,6 +145,7 @@ describe('ThreadBinding run admission', () => {
     const gone = new AbortController()
     const admitted = await binding.admit(input('admitted', [{ id: 'user', role: 'user', content: 'hello' }]), 'admitted', gone.signal)
     expect(getEventListeners(gone.signal, 'abort')).toHaveLength(0)
+    if ('replay' in admitted) throw new Error('Expected a fresh admission')
     await settle(admitted)
   })
 
@@ -882,6 +883,7 @@ describe('ThreadBinding overflow containment', () => {
     const active = binding.reserveRun(input('overflow-next', [{ id: 'overflow-result', role: 'tool', toolCallId: 'pending-overflow', content: 'ok' }], [TOOL]), 'overflow-next-digest')
     active.turn = first.turn
     const read = await binding.admit(input('overflow-read', []), 'overflow-read-digest', new AbortController().signal)
+    if ('replay' in read) throw new Error('Expected a history controller')
     read.start()
     read.emit({ type: EventType.MESSAGES_SNAPSHOT, messages: [{ id: 'huge', role: 'assistant', content: 'x'.repeat(OPTIONS.maxRunEventBytes) }] })
     first.error('AG_UI_EVENT_BUFFER_OVERFLOW', 'late overflow')

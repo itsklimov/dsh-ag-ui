@@ -128,7 +128,7 @@ lease.dispose()
 | `frontendToolTimeoutMs` | `300000` | Browser Tool result 最大等待时间 |
 | `maxRunEvents` | `4096` | 每个 run 最大保留 events |
 | `maxRunEventBytes` | `2097152` | 每个 run 最大保留 event bytes |
-| `maxRunsPerThread` | `32` | 每个 thread 最大 run ledger entries |
+| `maxRunsPerThread` | `32` | 每个 thread 保留的 run ledger entries 上限，同时也分别限制等待请求的数量 |
 
 `agentPreset` 让每个线程的 agent 从宿主的 agent-presets roster 组合而来（需在本 Gateway 之前挂载 roster 插件）；无法解析的 id 会让 Gateway 激活响亮失败，按租户条目覆盖该租户线程的部署默认值，而恢复的线程保持其持久 session 自己记录的组合。不配置 `agentPreset` 时，线程保持宿主组合不变。
 
@@ -310,6 +310,7 @@ Upstream Dojo 的 integration registry 是静态源码，目前没有 `deepseek-
 - 一个 DSH turn 可以跨多个 AG-UI HTTP runs。
 - 每个 run 发出一个 `RUN_STARTED` 和恰好一个 `RUN_FINISHED` 或 `RUN_ERROR`。
 - `runId` 是 exact-request idempotency key。已完成的相同 request 会重放 retained events，不再次驱动 DSH。
+- 每个 thread 最多允许 `maxRunsPerThread` 个请求排队等待，超出时返回 `429 RUN_QUEUE_FULL`。等待客户端断开连接会释放队列位置。一起排队的相同请求会重放同一份保留结果，不会重复驱动 DSH。
 - 一个 thread 同时只驱动一个 HTTP run。在另一个 run 活跃时到达的 run 会等待它以及 Agent turn 结束，因此同一 thread 的 runs 按到达顺序执行；等待中断开连接的客户端不会被接纳。
 - Active shared-state run 会在 model events 前发送 synchronization snapshot。
 - 一个 DSH step 可挂起多个 frontend Tool call；续跑可只回答其中一部分。

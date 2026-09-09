@@ -27,6 +27,8 @@ import { RunController, type RunRecord } from './run.ts'
 import type { ToolPresenter } from './tool-view.ts'
 import type { AgUiPrincipal, AgUiThreadIdentity } from './types.ts'
 
+export type RunAdmission = RunController | { replay: RunRecord }
+
 /** Roles a run may admit: user messages open a turn, Tool results continue one. Every other run only reads history. */
 const ADMITTED_ROLES: ReadonlySet<AgUiMessage['role']> = new Set(['user', 'tool'])
 const hasNewMessages = (messages: RunAgentInput['messages']): boolean => messages.some(message => ADMITTED_ROLES.has(message.role))
@@ -106,6 +108,7 @@ export class ThreadBinding {
   private disposed = false
   private interrupted = false
   private activeRun: RunController | undefined
+  private waitingRuns = 0
   private idleTimer: ReturnType<typeof setTimeout> | undefined
   private readonly acceptedMessages = new Map<string, AcceptedMessage>()
   private readonly frontendTools = new Map<string, FrontendToolRegistration>()
@@ -216,8 +219,12 @@ export class ThreadBinding {
    * @param runId - client run identity.
    * @returns active or completed record, or undefined for a fresh id.
    */
-  getRun(runId: string): RunRecord | undefined {
-    return this.runLedger.get(runId)
+  getRun(runId: string, digest?: string): RunRecord | undefined {
+    const record = this.runLedger.get(runId)
+    if (record !== undefined && digest !== undefined && record.digest !== digest) {
+      throw new AgUiGatewayError('RUN_ID_CONFLICT', 'The runId was reused with different input.', 409)
+    }
+    return record
   }
 
   /**
@@ -226,13 +233,17 @@ export class ThreadBinding {
    * the same tick, so two queued runs never race for one reservation.
    * @param signal - aborted once the waiting client is gone; that run is never admitted.
    */
-  async admit(input: RunAgentInput, digest: string, signal: AbortSignal): Promise<RunController> {
+  async admit(input: RunAgentInput, digest: string, signal: AbortSignal): Promise<RunAdmission> {
     const disconnected = new AgUiGatewayError('CLIENT_DISCONNECTED', 'The AG-UI client left before its queued run started.', 409)
     if (signal.aborted) throw disconnected
     if (!hasNewMessages(input.messages)) {
       this.assertLive()
       return this.newController(input, digest)
     }
+    if (this.waitingRuns >= this.options.maxRunsPerThread) {
+      throw new AgUiGatewayError('RUN_QUEUE_FULL', 'The AG-UI thread run queue is full.', 429)
+    }
+    this.waitingRuns++
     const runId = input.runId
     const session = String(this.sessionId)
     const left = Promise.withResolvers<never>()
@@ -254,11 +265,13 @@ export class ThreadBinding {
           this.ctx.logger.debug(`ag-ui: run ${runId} waits for the Agent of session ${session} to settle`)
           await Promise.race([this.liveAgent.whenIdle(), left.promise])
         } else {
-          return this.reserveRun(input, digest)
+          const replay = this.getRun(input.runId, digest)
+          return replay === undefined ? this.reserveRun(input, digest) : { replay }
         }
       }
     } finally {
       signal.removeEventListener('abort', onAbort)
+      this.waitingRuns--
     }
   }
 
@@ -271,11 +284,8 @@ export class ThreadBinding {
   reserveRun(input: RunAgentInput, digest: string): RunController {
     this.assertLive()
     this.clearIdleExpiry()
-    const existing = this.runLedger.get(input.runId)
+    const existing = this.getRun(input.runId, digest)
     if (existing !== undefined) {
-      if (existing.digest !== digest) {
-        throw new AgUiGatewayError('RUN_ID_CONFLICT', 'The runId was reused with different input.', 409)
-      }
       throw new AgUiGatewayError(
         existing.state === 'active' ? 'RUN_IN_PROGRESS' : 'RUN_ALREADY_COMPLETED',
         existing.state === 'active' ? 'The AG-UI run is still active.' : 'The AG-UI run already completed.',

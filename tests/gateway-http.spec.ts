@@ -274,6 +274,51 @@ describe('AG-UI gateway lifecycle', () => {
     expect(results[2].body).toContain('third-reply')
   })
 
+  it('replays identical requests that waited behind another run', async () => {
+    const gate = Promise.withResolvers<StreamChunk[]>()
+    const { ctx, url } = await mount({}, [gate.promise, textResponse('second-reply')])
+    const debug = vi.spyOn(ctx.logger, 'debug')
+    const first = postStreaming(url, input())
+    await first.started
+    const second = post(url, secondRun())
+    const duplicate = post(url, secondRun())
+    await vi.waitFor(() => {
+      expect(debug.mock.calls.filter(([message]) => String(message).includes('run-2 waits for the active run'))).toHaveLength(2)
+    })
+    gate.resolve(textResponse('first-reply'))
+    await first.result()
+    const [original, replay] = await Promise.all([second, duplicate])
+    expect(original.status).toBe(200)
+    expect(replay).toEqual(original)
+    expectCode(await post(url, { ...secondRun(), state: { changed: true } }), 409, 'RUN_ID_CONFLICT')
+  })
+
+  it('bounds queued requests and releases a queue slot on disconnect', async () => {
+    const gate = Promise.withResolvers<StreamChunk[]>()
+    const { ctx, url } = await mount({ maxRunsPerThread: 1 }, [gate.promise, textResponse('replacement')])
+    const debug = vi.spyOn(ctx.logger, 'debug')
+    const first = postStreaming(url, input())
+    await first.started
+    const waiting = postStreaming(url, secondRun())
+    await vi.waitFor(() => { expect(debug).toHaveBeenCalledWith(expect.stringContaining('run-2 waits for the active run')) })
+    let overflow: { status: number; body: string } | undefined
+    const rejected = post(url, input({ runId: 'overflow' })).then(result => { overflow = result })
+    try {
+      await vi.waitFor(() => { expect(overflow).toBeDefined() })
+      expectCode(overflow!, 429, 'RUN_QUEUE_FULL')
+      waiting.abort()
+      await vi.waitFor(() => { expect(debug).toHaveBeenCalledWith(expect.stringContaining('run-2 left the queue')) })
+      const replacement = post(url, input({ runId: 'replacement', messages: [{ id: 'replacement-user', role: 'user', content: 'replacement' }] }))
+      await vi.waitFor(() => { expect(debug).toHaveBeenCalledWith(expect.stringContaining('replacement waits for the active run')) })
+      gate.resolve(textResponse('first-reply'))
+      expect((await replacement).status).toBe(200)
+    } finally {
+      waiting.abort()
+      gate.resolve(textResponse('first-reply'))
+      await Promise.all([first.result(), rejected])
+    }
+  })
+
   it('serves a history-only run at once while another run is active', async () => {
     const gate = Promise.withResolvers<StreamChunk[]>()
     const { url } = await mount({}, [gate.promise])

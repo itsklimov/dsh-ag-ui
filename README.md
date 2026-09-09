@@ -128,7 +128,7 @@ A later Profile patch replaces the bundle row's complete `config`; include every
 | `frontendToolTimeoutMs` | `300000` | Maximum browser Tool result wait |
 | `maxRunEvents` | `4096` | Maximum events retained per run |
 | `maxRunEventBytes` | `2097152` | Maximum retained event bytes per run |
-| `maxRunsPerThread` | `32` | Maximum retained run ledger entries per thread |
+| `maxRunsPerThread` | `32` | Maximum retained run ledger entries and, separately, waiting requests per thread |
 
 `agentPreset` composes each thread's agent from the host's agent-presets roster (mount the roster plugin before this Gateway); an unresolvable id fails Gateway activation loudly, a per-tenant entry overrides the deployment default for that tenant's threads, and a resumed thread keeps the composition its own durable session recorded. Without `agentPreset`, threads keep the host composition unchanged.
 
@@ -310,7 +310,7 @@ The separate [`dsh-ag-ui-adapter`](packages/dsh-ag-ui-adapter) package is the em
 - One DSH turn can cross multiple AG-UI HTTP runs.
 - Each run emits one `RUN_STARTED` and exactly one `RUN_FINISHED` or `RUN_ERROR`.
 - `runId` is an exact-request idempotency key. Completed identical requests replay retained events without driving DSH again.
-- One thread drives one HTTP run at a time. A run that arrives while another is active waits for it and for the Agent turn to settle, so the runs of one thread are served in arrival order; a waiting client that disconnects is never admitted. Waiting and reservation happen together, so several queued runs all get their turn.
+- One thread drives one HTTP run at a time. A run that arrives while another is active waits for it and for the Agent turn to settle, so the runs of one thread are served in arrival order; a waiting client that disconnects is never admitted. Waiting and reservation happen together, so several queued runs all get their turn. At most `maxRunsPerThread` requests may wait per thread; excess requests receive `429 RUN_QUEUE_FULL`, and disconnect frees a queue slot. Identical requests that queued together replay the same retained result.
 - An active shared-state run emits its synchronization snapshot before model events.
 - One DSH step can park multiple frontend Tool calls; continuation runs may answer a subset.
 

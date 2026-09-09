@@ -14,9 +14,9 @@ import type {} from '@deepseek-ai/dsh-tools'
 import { AgUiGatewayError, publicError } from './errors.ts'
 import { jsonBytes, jsonDepth, requestDigest, utf8Bytes } from './json.ts'
 import { agentPresetsOf } from './presets.ts'
-import { replayRun, type RunController } from './run.ts'
+import { replayRun } from './run.ts'
 import { durableSessionId } from './session-id.ts'
-import { ThreadBinding, type ThreadOptions } from './thread.ts'
+import { ThreadBinding, type RunAdmission, type ThreadOptions } from './thread.ts'
 import type { AgUiAgentLookup, AgUiPrincipal, AgUiThreadIdentity } from './types.ts'
 
 export type { AgUiAgentLookup, AgUiPrincipal, AgUiThreadIdentity } from './types.ts'
@@ -196,15 +196,16 @@ export class AgUiGateway extends Service implements AgUiAgentLookup {
       const input = parseInput(body)
       validateLimits(input, this.resolved)
       const binding = await this.bindingFor(principal, input.threadId)
-      const prior = binding.getRun(input.runId)
+      const prior = binding.getRun(input.runId, digest)
       if (prior !== undefined) {
-        if (prior.digest !== digest) {
-          throw new AgUiGatewayError('RUN_ID_CONFLICT', 'The runId was reused with different input.', 409)
-        }
         await replayRun(response, prior)
         return
       }
       const controller = await this.admitRun(binding, input, digest, response)
+      if ('replay' in controller) {
+        await replayRun(response, controller.replay)
+        return
+      }
       if (response.destroyed) {
         binding.disconnect(controller)
         return
@@ -234,7 +235,7 @@ export class AgUiGateway extends Service implements AgUiAgentLookup {
     input: RunAgentInput,
     digest: string,
     response: ServerResponse,
-  ): Promise<RunController> {
+  ): Promise<RunAdmission> {
     const gone = new AbortController()
     const onClose = (): void => { gone.abort() }
     response.once('close', onClose)
