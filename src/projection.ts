@@ -202,6 +202,7 @@ export class SessionProjection {
         this.toolCallLifecycles.delete(callId)
         const args = this.callArguments.get(callId)
         this.callArguments.delete(callId)
+        this.serverResultCallIds.add(callId)
         if (lifecycle?.kind === 'state') {
           const commit = lifecycle.commit
           if (commit !== undefined && !block.isError && commit.changed) {
@@ -210,7 +211,6 @@ export class SessionProjection {
           }
           return EMPTY_STEP
         }
-        this.serverResultCallIds.add(callId)
         if (lifecycle?.kind === 'frontend' || lifecycle?.kind === 'awaiting') return EMPTY_STEP
         const result = {
           type: EventType.TOOL_CALL_RESULT,
