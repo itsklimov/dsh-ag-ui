@@ -15,7 +15,7 @@
 - 通过 `ctx.agUi` 暴露的标准 Cordis `Service` 插件
 - 通过 `ctx.browserTools` 暴露的传输无关 Agent-scoped browser Tool broker
 - 可使用 `dsh plugin add` 安装的 DSH Profile Bundle
-- 下限式 AG-UI 协议范围（`~0.0.58`）
+- 下限式 AG-UI 协议范围（`~0.0.59`）
 - 使用可信 tenant/user headers 的 BFF-to-Gateway 认证
 - 按 thread 流式上传文件并通过认证 route 下载
 - `(tenantId, userId, threadId)` 到 DSH Agent 的进程内绑定
@@ -247,7 +247,7 @@ AG-UI gateway 只是众多带 HTTP remote 的 Host-plane service 之一；其他
 
 ## 浏览器客户端
 
-在 frontend application 中安装官方 client。支持协议范围（`>=0.0.58 <0.1.0`）内的任意版本均可；网关不要求 client 精确锁版：
+在 frontend application 中安装官方 client。支持协议范围（`>=0.0.59 <0.1.0`）内的任意版本均可；网关不要求 client 精确锁版：
 
 ```bash
 pnpm add @ag-ui/client
@@ -281,6 +281,10 @@ await agent.runAgent({
 ```
 
 模型调用 browser-owned Tool 时，当前 HTTP run 成功结束，但 DSH Tool Promise 仍然 pending。浏览器执行 Tool、追加一条使用相同 `toolCallId` 的标准 AG-UI ToolMessage，再开始另一个 run。Gateway resolve 原始 Promise，并继续同一个 DSH turn。
+
+官方 `@ag-ui/a2ui-middleware` 使用同一套原生 contract。middleware 直接根据流式 Tool 参数渲染，从不发送浏览器 result，因此 Gateway 不会 park 它在 `forwardedProps.injectA2UITool` 中标记的 render Tool：该调用立即以 `{"status":"rendered"}` 结算，result 在同一个 run 内流出，DSH turn 继续执行。客户端自行注册的 render Tool 仍像其他浏览器 Tool 一样 park。之后的 `forwardedProps.a2uiAction` 会作为 durable plugin context 开启下一个 turn。该 context 同时保留可读的 middleware result 与完整、已校验的 action JSON（包括可选 timestamp），并递归排序对象键。Gateway 只接受 middleware 的精确有界 action envelope，以及末尾匹配的 `log_a2ui_event` assistant/Tool pair；它不会把任意 assistant history 导入 DSH。
+
+Synthetic result message ID 在原生 inbox 与持久化日志中标识该 action。同一对已生成的 messages 在不同 HTTP run ID 或重启后重试时保持幂等；同一 identity 携带不同 action 内容会被拒绝。每次新点击必须使用新的 result ID，即使 payload 与之前相同。Middleware 重试必须保留已生成的 pair identities。
 
 普通 browser Tool result 不要通过 AG-UI `resume[]` 发送；该字段保留给显式 interrupt/HITL flow。
 
@@ -341,6 +345,9 @@ Upstream Dojo 的 integration registry 是静态源码，目前没有 `deepseek-
 - Request 必须为 `POST application/json`，并且符合 AG-UI `RunAgentInput`。
 - 普通 run 接受一条或多条包含文本或受支持 content parts 的新 user message，它们按到达顺序进入同一个 DSH turn。没有新消息的 run（包括重发完整已接纳 transcript）只返回历史 snapshot，不会在活跃 run 后面等待。
 - Continuation 接受属于一个 pending DSH turn 的一条或多条新 frontend ToolMessages。
+- 官方 A2UI user-action run 接受经过校验的 `a2uiAction` envelope 与匹配的 synthetic `log_a2ui_event` pair；它也可以同时携带客户端自有 pending `render_a2ui` 调用的 result。
+- middleware 在 `forwardedProps.injectA2UITool` 中标记的 render Tool 会在其 run 内以 `{"status":"rendered"}` 结算，从不 park。
+- 已认证 pending frontend Tool result 上的标准对象 metadata 会通过原生 DSH presentation metadata 持久化，并由后续 message snapshot 返回；没有 metadata 的结果在 wire 上保持不变。
 - 一个 DSH turn 可以跨多个 AG-UI HTTP runs。
 - 每个 run 发出一个 `RUN_STARTED` 和恰好一个 `RUN_FINISHED` 或 `RUN_ERROR`。
 - frontend call 等待期间，native turn 可以在 HTTP response 结束后继续存在。持久化结果、共享状态更新和 turn 结束事件仍会更新 thread projection。无效的 continuation 不会消费 pending call，客户端可修正后重试。
@@ -397,7 +404,7 @@ Backend Tool result 会发出 `TOOL_CALL_RESULT`。Frontend Tool result 不在 A
 
 | 组件 | 支持版本 |
 | --- | --- |
-| AG-UI core/client/encoder | `>=0.0.58 <0.1.0`（`~0.0.58`；已用 `0.0.58` 验证） |
+| AG-UI core/client/encoder | `>=0.0.59 <0.1.0`（`~0.0.59`；已用 `0.0.59` 验证） |
 | Node.js | `^22.19.0` 或 `>=24.0.0` |
 | DeepSeek Harness | `0.1.5-alpha.2`（精确的 developer-preview peers） |
 
