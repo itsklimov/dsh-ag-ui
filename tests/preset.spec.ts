@@ -445,6 +445,18 @@ describe('preset selection admission lifetime', () => {
     await binding.dispose()
   })
 
+  it('does not retain a history run disconnected while its selector is being validated', async () => {
+    const { binding } = await bindingFor()
+    const abort = new AbortController()
+    const history = { ...input, messages: [] }
+    const admission = binding.admit(history, 'history-digest', abort.signal)
+    abort.abort()
+    await expect(admission).rejects.toMatchObject({ code: 'CLIENT_DISCONNECTED' })
+    expect(binding.getRun(history.runId)).toBeUndefined()
+    expect(sessionPresetOf(binding.liveAgent.session)).toBe('alpha')
+    await binding.dispose()
+  })
+
   it.each(['abort', 'dispose'])('does not start a turn when %s occurs during selection', async action => {
     const { ctx, binding } = await bindingFor()
     const native = binding.liveAgent
