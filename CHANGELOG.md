@@ -14,6 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Native `@ag-ui/a2ui-middleware` render settlement and canonical validated user-action continuation across DSH turns.
 - Middleware-flagged A2UI render calls settle inside their run with `{"status":"rendered"}` instead of parking for a browser result the middleware never sends.
 - Durable native projection of frontend Tool-result metadata through DSH presentation metadata.
+- A `dsh-ag-ui/client` companion whose `DshHttpAgent` sends only messages relevant to the stateful Gateway's next admission while retaining full client history.
 - Bidirectional shared state with `STATE_SNAPSHOT` and the reserved `ag_ui_update_state` Tool.
 - Dojo-compatible keyless examples for chat, backend Tools, shared state, HITL, and tool-based generative UI.
 
