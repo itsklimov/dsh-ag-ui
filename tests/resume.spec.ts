@@ -33,6 +33,7 @@ const OPTIONS: ThreadOptions = {
   maxRunEventBytes: 128 * 1024,
   maxRunsPerThread: 4,
   maxStateBytes: 64 * 1024,
+  maxFilesPerMessage: 8,
 }
 
 const roots: string[] = []
