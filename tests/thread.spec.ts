@@ -152,6 +152,7 @@ interface TestPendingCall {
 }
 
 interface ThreadBindingInternals {
+  recover(events: readonly SessionEvent[]): void
   nativeTurn: number | undefined
   activeRun: ReturnType<ThreadBinding['reserveRun']> | undefined
   pendingCalls: Map<string, TestPendingCall>
@@ -301,6 +302,29 @@ describe('ThreadBinding run admission', () => {
     binding.drive(history)
     expect(history.record.events.at(-1)).toMatchObject({ type: EventType.RUN_FINISHED })
     expect(internals(binding).nativeTurn).toBeUndefined()
+  })
+
+  it('compares named user history by the same identity before and after recovery', async () => {
+    const live = await mount()
+    const user = { id: 'named-user', role: 'user' as const, content: 'hello', name: 'Nikolay' }
+    const first = live.binding.reserveRun(input('first', [user]), 'first')
+    live.binding.drive(first)
+    await first.done
+    await live.binding.liveAgent.whenIdle()
+    const snapshot = first.record.events.findLast(event => event.type === EventType.MESSAGES_SNAPSHOT)!
+    const transcript = (snapshot.messages as RunAgentInput['messages']).map(message => message.id === user.id ? user : message)
+    const recovered = await mount([])
+    internals(recovered.binding).recover(live.binding.liveAgent.session.snapshotEvents())
+    for (const { binding } of [live, recovered]) {
+      const history = await binding.admit(input('history', transcript), 'history', new AbortController().signal)
+      if ('replay' in history) throw new Error('Expected history admission')
+      binding.drive(history)
+      expect(history.record.events.at(-1)).toMatchObject({ type: EventType.RUN_FINISHED })
+      await expect(binding.admit(input('changed', [{ ...user, content: 'different' }]), 'changed', new AbortController().signal))
+        .rejects.toMatchObject({ code: 'MESSAGE_ID_CONFLICT' })
+    }
+    expect(live.adapter.requests).toHaveLength(1)
+    expect(recovered.adapter.requests).toHaveLength(0)
   })
 
   it('retains history runs for identical replay, conflicts, and concurrent duplicate admission', async () => {

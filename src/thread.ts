@@ -888,7 +888,7 @@ export class ThreadBinding {
       if (message.role !== 'user' && message.role !== 'tool') continue
       if (ids.has(message.id)) throw new AgUiGatewayError('INVALID_MESSAGE_BATCH', 'Message ids must be unique within a run.')
       ids.add(message.id)
-      const digest = valueDigest(message)
+      const digest = message.role === 'user' ? messageDigest(message.id, message.content) : valueDigest(message)
       const accepted = this.acceptedMessages.get(message.id)
       if (accepted !== undefined) {
         if (accepted.role !== message.role || accepted.digest !== digest) {
