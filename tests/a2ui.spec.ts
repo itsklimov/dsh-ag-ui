@@ -161,7 +161,7 @@ describe('official A2UI middleware contract', () => {
   it.each([false, true])('deduplicates an action delivery across HTTP runs, restart=%s', async (restart) => {
     const persistenceRoot = await mkdtemp(join(tmpdir(), 'ag-ui-a2ui-retry-'))
     roots.push(persistenceRoot)
-    let harness = await mountGateway([textResponse('Action handled.'), textResponse('New click handled.')], SECRET, { persistenceRoot })
+    let harness = await mountGateway([textResponse('Action handled.'), textResponse('New click handled.')], SECRET, { persistenceRoot, workspaceRoot: join(persistenceRoot, 'workspaces') })
     let formed: RunAgentInput | undefined
     const agent = new HttpAgent({
       url: harness.url, headers: HEADERS, threadId: 'action-retry',
@@ -175,7 +175,7 @@ describe('official A2UI middleware contract', () => {
     if (formed === undefined) throw new Error('Expected the middleware request')
     if (restart) {
       await harness.ctx.fiber.dispose()
-      harness = await mountGateway([textResponse('New click handled.')], SECRET, { persistenceRoot })
+      harness = await mountGateway([textResponse('New click handled.')], SECRET, { persistenceRoot, workspaceRoot: join(persistenceRoot, 'workspaces') })
     }
     const before = harness.adapter.requests.length
     const retry = new HttpAgent({ url: harness.url, headers: HEADERS, threadId: 'action-retry', initialMessages: formed.messages })
@@ -247,7 +247,7 @@ describe('official A2UI middleware contract', () => {
       }),
       textResponse('The durable overview is ready.'),
       textResponse('The durable action was handled.'),
-    ], SECRET, { persistenceRoot })
+    ], SECRET, { persistenceRoot, workspaceRoot: join(persistenceRoot, 'workspaces') })
     const agent = new HttpAgent({ url: first.url, headers: HEADERS, threadId: 'a2ui-durable-thread' })
       .use(new A2UIMiddleware({ injectA2UITool: true, defaultCatalogId: 'catalog.test' }))
     agent.addMessage({ id: 'a2ui-durable-user', role: 'user', content: 'Render durably.' })
@@ -265,7 +265,7 @@ describe('official A2UI middleware contract', () => {
     await new Promise(resolve => setTimeout(resolve, 300))
 
     const second = await mountGateway([textResponse('Recovered action context retained.')], SECRET, {
-      persistenceRoot,
+      persistenceRoot, workspaceRoot: join(persistenceRoot, 'workspaces'),
     })
     const recovered = new HttpAgent({ url: second.url, headers: HEADERS, threadId: 'a2ui-durable-thread' })
       .use(new A2UIMiddleware({ injectA2UITool: true, defaultCatalogId: 'catalog.test' }))

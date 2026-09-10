@@ -1,4 +1,7 @@
 import { afterEach, expect, it } from 'vitest'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import Approval from '@deepseek-ai/dsh-user-approval'
 import * as AskUser from '@deepseek-ai/dsh-tool-ask-user'
@@ -12,7 +15,11 @@ import { mountTestAgentCore } from './agent-core.ts'
 import { ScriptedAdapter, textResponse, toolCallsResponse } from './scripted-adapter.ts'
 
 const contexts: Context[] = []
-afterEach(async () => { for (const ctx of contexts.splice(0)) await ctx.fiber.dispose() })
+const roots: string[] = []
+afterEach(async () => {
+  for (const ctx of contexts.splice(0)) await ctx.fiber.dispose()
+  await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
+})
 const frontend = { name: 'ui_action', description: 'A frontend action.', parameters: { type: 'object', properties: {} } }
 function input(runId: string, extra: Partial<RunAgentInput> = {}): RunAgentInput {
   return { threadId: 'human', runId, messages: [], tools: [frontend], context: [], state: {}, forwardedProps: {}, ...extra }
@@ -31,8 +38,10 @@ async function mount(calls = [{ callId: 'approval-call', name: 'effect', args: {
   const unguard = ctx.on('tools/pre-execute', (exec, next) => exec.name === 'effect' ? Promise.resolve({ kind: 'ask', reason: 'Allow the effect?' }) : next())
   const adapter = new ScriptedAdapter([toolCallsResponse(calls), textResponse('finished')])
   ctx.llm.registerAdapter(['scripted'], adapter)
+  const workspaceRoot = await mkdtemp(join(tmpdir(), 'ag-ui-human-workspaces-'))
+  roots.push(workspaceRoot)
   const binding = new ThreadBinding(ctx, { tenantId: 't', userId: 'u' }, 'human', SessionId('human-session'), {
-    provider: 'scripted', model: 'scripted', frontendToolTimeoutMs: 10000, threadIdleMs: 60000,
+    workspaceRoot, maxFilesPerMessage: 8, provider: 'scripted', model: 'scripted', frontendToolTimeoutMs: 10000, threadIdleMs: 60000,
     maxRunEvents: 128, maxRunEventBytes: 128 * 1024, maxRunsPerThread: 16, maxStateBytes: 65536, ...options,
   }, () => {})
   await binding.initialize()
@@ -194,18 +203,37 @@ it('validates server-result echoes together with the entire human response befor
   await run(binding, input('valid', { messages, resume: [{ interruptId: approval!.id, status: 'resolved', payload: { approved: true } }] }))
   expect(effects()).toBe(1)
 })
-it('can answer frontend and human waits atomically in the same native turn', async () => {
-  const { binding, effects } = await mount([{ callId: 'frontend-call', name: frontend.name, args: {} }, effectCall])
+it.each([false, true])('can answer frontend and human waits atomically in the same native turn, with A2UI action=%s', async withAction => {
+  const { binding, effects, adapter } = await mount([{ callId: 'frontend-call', name: frontend.name, args: {} }, effectCall])
   const first = await run(binding, input('first', { messages: [user] }))
   expect(first.at(-1)).toMatchObject({ outcome: { type: 'success' } })
   await new Promise(resolve => setImmediate(resolve))
   const [approval] = interrupts(await run(binding, input('reload')))
-  const messages = [{ id: 'frontend-result', role: 'tool' as const, toolCallId: 'frontend-call', content: 'done' }]
-  await expect(run(binding, input('missing', { messages }))).rejects.toMatchObject({ code: 'INCOMPLETE_INTERRUPT_RESPONSE' })
+  const action = { name: 'approve', surfaceId: 'review' }
+  const messages: RunAgentInput['messages'] = [{ id: 'frontend-result', role: 'tool', toolCallId: 'frontend-call', content: 'done' }]
+  if (withAction) messages.push({
+    id: 'action-assistant', role: 'assistant', content: '',
+    toolCalls: [{ id: 'action-call', type: 'function', function: { name: 'log_a2ui_event', arguments: JSON.stringify(action) } }],
+  }, {
+    id: 'action-result', role: 'tool', toolCallId: 'action-call',
+    content: 'User performed action "approve" on surface "review". Context: {}',
+  })
+  const forwardedProps = withAction ? { a2uiAction: { userAction: action } } : {}
+  await expect(run(binding, input('missing', { messages, forwardedProps }))).rejects.toMatchObject({ code: 'INCOMPLETE_INTERRUPT_RESPONSE' })
   await expect(run(binding, input('mixed', { messages: [{ ...user, id: 'new' }], resume: [{ interruptId: approval!.id, status: 'cancelled' }] }))).rejects.toMatchObject({ code: 'INVALID_MESSAGE_BATCH' })
-  const result = await run(binding, input('both', { messages, resume: [{ interruptId: approval!.id, status: 'resolved', payload: { approved: true } }] }))
+  const request = input('both', { messages, forwardedProps, resume: [{ interruptId: approval!.id, status: 'resolved', payload: { approved: true } }] })
+  const result = await run(binding, request)
   expect(result.at(-1)).toMatchObject({ outcome: { type: 'success' } })
   expect(effects()).toBe(1)
+  expect(binding.liveAgent.session.snapshotEvents().filter(event => event.type === 'turn/start')).toHaveLength(1)
+  expect(adapter.requests).toHaveLength(2)
+  if (withAction) {
+    expect(adapter.requests[1]!.messages.some(message => message.content.some(part => part.type === 'text'
+      && part.text.includes('A2UI user action JSON: {"name":"approve","surfaceId":"review"}')))).toBe(true)
+    await run(binding, { ...request, runId: 'retry' })
+    expect(adapter.requests).toHaveLength(2)
+    expect(effects()).toBe(1)
+  }
 })
 it('cancels the native owner if the interrupt itself cannot fit in the terminal event budget', async () => {
   const { ctx, binding, effects, unguard } = await mount([effectCall], { maxRunEventBytes: 4096 })
