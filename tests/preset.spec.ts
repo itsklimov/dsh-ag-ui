@@ -2,9 +2,9 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { HttpAgent } from '@ag-ui/client'
-import { EventType } from '@ag-ui/core'
+import { EventType, type RunAgentInput } from '@ag-ui/core'
 import { Context } from '@deepseek-ai/cordis'
 import AgentPresets from '@deepseek-ai/dsh-agent-presets'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
@@ -35,11 +35,12 @@ const contexts: Context[] = []
 const roots: string[] = []
 
 afterEach(async () => {
+  vi.restoreAllMocks()
   for (const ctx of contexts.splice(0).reverse()) await ctx.fiber.dispose()
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 
-async function mount(overrides: Partial<Config> = {}, script: StreamChunk[][] = [textResponse('ok')], withRoster = true): Promise<{ url: string, adapter: ScriptedAdapter }> {
+async function mount(overrides: Partial<Config> = {}, script: StreamChunk[][] = [textResponse('ok')], withRoster = true): Promise<{ url: string, adapter: ScriptedAdapter, ctx: Context }> {
   const ctx = new Context()
   ctx.baseUrl = new URL('./fixtures/presets/roots/', import.meta.url).href
   contexts.push(ctx)
@@ -61,7 +62,7 @@ async function mount(overrides: Partial<Config> = {}, script: StreamChunk[][] = 
     workspaceRoot,
     ...overrides,
   })
-  return { url: `http://127.0.0.1:${String(ctx.webServer.port)}/ag-ui`, adapter }
+  return { url: `http://127.0.0.1:${String(ctx.webServer.port)}/ag-ui`, adapter, ctx }
 }
 
 function agentFor(url: string, tenantId: string, threadId: string): HttpAgent {
@@ -215,6 +216,7 @@ describe('resumed threads keep their recorded composition', () => {
     model: 'scripted',
     workspaceRoot,
     presetId,
+    selectablePresetIds: new Set(['beta']),
     frontendToolTimeoutMs: 10_000,
     threadIdleMs: 60_000,
     maxRunEvents: 128,
@@ -224,7 +226,7 @@ describe('resumed threads keep their recorded composition', () => {
     maxFilesPerMessage: 8,
   })
 
-  it('mounts the log-recorded preset even after the tenant override changed', async () => {
+  it('restores a native selected preset after restart even when the creation default differs', async () => {
     const root = await mkdtemp(join(tmpdir(), 'ag-ui-preset-'))
     roots.push(root)
     const principal = { tenantId: 'tenant-1', userId: 'user-1' }
@@ -242,15 +244,16 @@ describe('resumed threads keep their recorded composition', () => {
     const original = new ThreadBinding(first, principal, 'preset-resume', sessionId, OPTIONS('alpha', workspaceRoot), () => {})
     await original.initialize()
     expect(original.liveAgent.session.header.agentPreset).toBe('alpha')
-    const firstRun = original.reserveRun({
+    const firstRun = await original.admit({
       threadId: 'preset-resume',
       runId: 'preset-resume-run-1',
       messages: [{ id: 'preset-resume-user-1', role: 'user', content: 'Run the first turn.' }],
       tools: [],
       context: [],
       state: {},
-      forwardedProps: {},
-    }, 'digest-preset-resume-1')
+      forwardedProps: { agentPreset: 'beta' },
+    }, 'digest-preset-resume-1', new AbortController().signal)
+    if ('replay' in firstRun) throw new Error('Expected a new run.')
     original.drive(firstRun)
     await firstRun.done
     await original.dispose()
@@ -258,7 +261,7 @@ describe('resumed threads keep their recorded composition', () => {
     await first.fiber.dispose()
     contexts.splice(contexts.indexOf(first), 1)
 
-    // the deployment now points this tenant at beta; the resumed session still composes alpha
+    // Creation and deployment defaults are alpha; the durable native selection restores beta.
     const second = new Context()
     second.baseUrl = new URL('./fixtures/presets/roots/', import.meta.url).href
     contexts.push(second)
@@ -266,28 +269,8 @@ describe('resumed threads keep their recorded composition', () => {
     await second.plugin(Loader)
     await second.plugin(AgentPresets, { default: 'alpha', roots: [{ path: ROOT, trust: 'system' }], includeUserRoot: false })
     second.llm.registerAdapter(['scripted'], new ScriptedAdapter([
-      toolCallsResponse([{ callId: 'resumed-call-1', name: 'preset_alpha_probe', args: { probe: 'resumed' } }]),
-      textResponse('alpha still composes the resumed thread.'),
+      toolCallsResponse([{ callId: 'resumed-call-1', name: 'preset_beta_probe', args: { probe: 'resumed' } }]),
+      textResponse('beta still composes the resumed thread.'),
     ]))
     await second.plugin(JsonlSessionPersistence, { root, compression: 'none' })
-    const resumed = new ThreadBinding(second, principal, 'preset-resume', sessionId, OPTIONS('beta', workspaceRoot), () => {})
-    await resumed.initialize()
-    expect(sessionPresetOf(resumed.liveAgent.session)).toBe('alpha')
-
-    const run = resumed.reserveRun({
-      threadId: 'preset-resume',
-      runId: 'preset-resume-run-2',
-      messages: [{ id: 'preset-resume-user-1', role: 'user', content: 'Run the first turn.' }, { id: 'preset-resume-user-2', role: 'user', content: 'Probe the preset again.' }],
-      tools: [],
-      context: [],
-      state: {},
-      forwardedProps: {},
-    }, 'digest-preset-resume-2')
-    resumed.drive(run)
-    await run.done
-    const events = run.record.events as Array<{ type: string, content?: unknown, toolCallId?: unknown }>
-    const result = events.find(event => event.type === EventType.TOOL_CALL_RESULT)
-    expect(JSON.parse(String(result?.content))).toMatchObject({ preset: 'alpha', marker: 'alpha-tool-live' })
-    expect(events.at(-1)).toMatchObject({ type: EventType.RUN_FINISHED })
-  })
-})
+    const resumed = new ThreadBinding(second, principal, 'preset-resume', sessionId, OPTIONS('alpha', workspaceRoot), () => {})
