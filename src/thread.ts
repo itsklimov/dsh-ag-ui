@@ -587,9 +587,9 @@ export class ThreadBinding {
   }
 
   /** Validate human responses without consuming answers or accepted message identities. */
-  private prepareResume(input: RunAgentInput, kind: 'sync' | 'user' | 'tools'): PreparedResume | undefined {
+  private prepareResume(input: RunAgentInput, kind: ReturnType<ThreadBinding['classifyMessages']>['kind']): PreparedResume | undefined {
     const hasResume = (input.resume?.length ?? 0) !== 0
-    if (hasResume && kind === 'user') {
+    if (hasResume && kind !== 'sync' && kind !== 'tools') {
       throw new AgUiGatewayError('INVALID_MESSAGE_BATCH', 'A run cannot mix user messages and interrupt responses.')
     }
     if (!hasResume && this.interrupts.visible.length !== 0 && kind !== 'sync') {
