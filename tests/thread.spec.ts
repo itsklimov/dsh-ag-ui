@@ -704,11 +704,19 @@ describe('ThreadBinding frontend Tools', () => {
     expect(result.record.events.at(-1)?.type).toBe(EventType.RUN_FINISHED)
   })
 
-  it.each(['context-append', 'before-append', 'after-append', 'after-claim'] as const)('contains failed action admission %s without retrying consumed work', async failure => {
+  it.each(['context-append', 'before-append', 'after-append', 'after-claim', 'turn-start'] as const)('contains failed action admission %s without retrying consumed work', async failure => {
     const { binding, adapter } = await mount([textResponse('action handled')])
     const agent = binding.liveAgent
     const followup = agent.followup.bind(agent)
     const broken = vi.spyOn(agent, failure === 'context-append' ? 'inject' : 'followup').mockImplementationOnce(message => {
+      if (failure === 'turn-start') {
+        const stop = agent.ctx.on('agent/status', ({ status }) => {
+          if (status !== 'running') return
+          stop()
+          vi.spyOn(agent.session, 'append').mockImplementationOnce(() => { throw new Error('turn/start append failed') })
+        })
+        return followup(message)
+      }
       if (failure === 'context-append') agent.inbox.append('next-step', message)
       if (failure === 'after-append') agent.inbox.append('next-turn', message)
       if (failure === 'after-claim') followup(message)
