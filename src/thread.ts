@@ -625,12 +625,18 @@ export class ThreadBinding {
     const baseline = this.prepareSharedState(controller.input)
     this.assertStateToolAvailable(baseline)
     this.applyFrontendTools(controller.input.tools)
-    this.injectContext(controller.input, baseline)
-    this.commitSharedStateBaseline(baseline)
-    this.commitServerEchoes(echoes)
     const message = this.a2uiActionMessage(action)
-    controller.messageId = String(message.id)
-    this.liveAgent.followup(message)
+    try {
+      this.injectContext(controller.input, baseline)
+      this.commitSharedStateBaseline(baseline)
+      this.commitServerEchoes(echoes)
+      controller.messageId = String(message.id)
+      this.liveAgent.followup(message)
+    } catch (error) {
+      // A durable append can succeed before an inbox notification throws.
+      this.liveAgent.cancel({ kind: 'hook', reason: 'AG-UI action admission failed' })
+      throw error
+    }
   }
 
   /** Add an action to the next step of the still-open render turn. */

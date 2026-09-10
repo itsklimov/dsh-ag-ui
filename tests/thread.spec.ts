@@ -704,6 +704,44 @@ describe('ThreadBinding frontend Tools', () => {
     expect(result.record.events.at(-1)?.type).toBe(EventType.RUN_FINISHED)
   })
 
+  it.each(['context-append', 'before-append', 'after-append', 'after-claim'] as const)('contains failed action admission %s without retrying consumed work', async failure => {
+    const { binding, adapter } = await mount([textResponse('action handled')])
+    const agent = binding.liveAgent
+    const followup = agent.followup.bind(agent)
+    const broken = vi.spyOn(agent, failure === 'context-append' ? 'inject' : 'followup').mockImplementationOnce(message => {
+      if (failure === 'context-append') agent.inbox.append('next-step', message)
+      if (failure === 'after-append') agent.inbox.append('next-turn', message)
+      if (failure === 'after-claim') followup(message)
+      throw new Error('action admission notification failed')
+    })
+    const action = { name: 'approve', surfaceId: 'review' }
+    const request = {
+      ...input('action-failed', [{
+        id: 'action-assistant', role: 'assistant', content: '',
+        toolCalls: [{ id: 'action-call', type: 'function', function: { name: 'log_a2ui_event', arguments: JSON.stringify(action) } }],
+      }, {
+        id: 'action-result', role: 'tool', toolCallId: 'action-call',
+        content: 'User performed action "approve" on surface "review". Context: {}',
+      }]),
+      context: [{ description: 'Current page', value: 'review' }],
+      forwardedProps: { a2uiAction: { userAction: action } },
+    }
+    const failed = binding.reserveRun(request, 'action-failed')
+    binding.drive(failed)
+    await failed.done
+    await agent.whenIdle()
+    expect(failed.record.events.at(-1)).toMatchObject({ type: EventType.RUN_ERROR, code: 'AGENT_EXECUTION_ERROR' })
+    expect(agent.inbox.nextStep).toEqual([])
+    expect(agent.inbox.nextTurn).toEqual([])
+    expect(adapter.requests).toHaveLength(0)
+    broken.mockRestore()
+    const retry = await binding.admit({ ...request, runId: 'action-retry' }, 'action-retry', new AbortController().signal)
+    if ('replay' in retry) throw new Error('Expected retry admission')
+    binding.drive(retry)
+    await retry.done
+    expect(adapter.requests).toHaveLength(failure === 'after-claim' ? 0 : 1)
+  })
+
   it('persists configured opaque metadata only on its admitted render result', async () => {
     const render = { ...TOOL, name: 'render_a2ui' }
     const { binding } = await mount([scriptedToolResponse('configured-render', render.name, { value: 'x' }), textResponse('done')])
