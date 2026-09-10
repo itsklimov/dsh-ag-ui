@@ -632,6 +632,7 @@ export class ThreadBinding {
       this.commitServerEchoes(echoes)
       controller.messageId = String(message.id)
       this.liveAgent.followup(message)
+      if (controller.record.state !== 'active') throw new Error('Native admission settled the AG-UI run')
     } catch (error) {
       // A durable append can succeed before an inbox notification throws.
       this.liveAgent.cancel({ kind: 'hook', reason: 'AG-UI action admission failed' })
